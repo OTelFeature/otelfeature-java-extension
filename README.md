@@ -25,24 +25,24 @@ restart, no redeploy.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  JVM + OTel Java Agent                                │
-│                                                       │
+│  JVM + OTel Java Agent                               │
+│                                                      │
 │  ┌──────────────┐   ┌──────────────┐   ┌───────────┐ │
 │  │ Instrumented │──▶│ SpanExporter │──▶│  OTLP to  │ │
-│  │ libraries    │   │ (wrapped)    │   │  collector │ │
+│  │ libraries    │   │ (wrapped)    │   │ collector │ │
 │  └──────────────┘   └──────┬───────┘   └───────────┘ │
-│                            │                          │
-│                     ┌──────▼───────┐                  │
-│                     │ Filtering    │                  │
-│                     │ SpanExporter │                  │
-│                     │  (this ext)  │                  │
-│                     └──────┬───────┘                  │
-│                            │                          │
-│                     ┌──────▼───────┐                  │
-│                     │ FlagdClient   │──HTTP──▶ flagd  │
-│                     │ (polls every   │   :8016  OFREP  │
-│                     │  5 seconds)   │                  │
-│                     └──────────────┘                  │
+│                            │                         │
+│                     ┌──────▼───────┐                 │
+│                     │ Filtering    │                 │
+│                     │ SpanExporter │                 │
+│                     │  (this ext)  │                 │
+│                     └──────┬───────┘                 │
+│                            │                         │
+│                     ┌──────▼───────┐                 │
+│                     │ FlagdClient  │──HTTP──▶ flagd  │
+│                     │ (polls every │   :8016  OFREP  │
+│                     │  5 seconds)  │                 │
+│                     └──────────────┘                 │
 └──────────────────────────────────────────────────────┘
 ```
 
