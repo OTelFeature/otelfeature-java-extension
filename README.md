@@ -25,7 +25,7 @@ restart, no redeploy.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  JVM + OTel Java Agent                                        │
+│  JVM + OTel Java Agent                                       │
 │                                                              │
 │  ┌──────────────┐   ┌──────────────────┐   ┌──────────────┐  │
 │  │ Instrumented │──▶│ Filtering        │──▶│ BatchSpan    │  │
@@ -33,13 +33,13 @@ restart, no redeploy.
 │  └──────────────┘   │ (this extension) │   └──────┬───────┘  │
 │                     └────────┬─────────┘          │          │
 │                              │                    ▼          │
-│                       ┌──────▼───────┐      ┌──────────────┐  │
-│                       │ FlagdClient  │      │ SpanExporter │  │
-│                       │ (polls every │      │ → OTLP to    │  │
-│                       │  5 seconds)  │      │   collector  │  │
-│                       └──────┬───────┘      └──────────────┘  │
-│                              │                                │
-│                              └──HTTP──▶ flagd :8016 (OFREP)   │
+│                       ┌──────▼───────┐      ┌──────────────┐ │
+│                       │ FlagdClient  │      │ SpanExporter │ │
+│                       │ (polls every │      │ → OTLP to    │ │
+│                       │  5 seconds)  │      │   collector  │ │
+│                       └──────┬───────┘      └──────────────┘ │
+│                              │                               │
+│                              └──HTTP──▶ flagd :8016 (OFREP)  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
