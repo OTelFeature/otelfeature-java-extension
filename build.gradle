@@ -18,17 +18,17 @@ repositories {
 dependencies {
     // The OTel SDK and autoconfigure SPI are provided by the agent
     // at runtime. We only need them at compile time.
-    compileOnly 'io.opentelemetry:opentelemetry-api:1.44.0'
-    compileOnly 'io.opentelemetry:opentelemetry-sdk:1.44.0'
-    compileOnly 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.44.0'
+    compileOnly 'io.opentelemetry:opentelemetry-api:1.65.0'
+    compileOnly 'io.opentelemetry:opentelemetry-sdk:1.65.0'
+    compileOnly 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.65.0'
 
     // Test dependencies
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
-    testImplementation 'io.opentelemetry:opentelemetry-api:1.44.0'
-    testImplementation 'io.opentelemetry:opentelemetry-sdk:1.44.0'
-    testImplementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.44.0'
-    testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.44.0'
+    testImplementation 'io.opentelemetry:opentelemetry-api:1.65.0'
+    testImplementation 'io.opentelemetry:opentelemetry-sdk:1.65.0'
+    testImplementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.65.0'
+    testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.65.0'
 }
 
 test {
