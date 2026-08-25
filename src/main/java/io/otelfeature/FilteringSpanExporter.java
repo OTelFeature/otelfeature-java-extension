@@ -4,7 +4,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import io.opentelemetry.sdk.common.CompletableResult;
+import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 
@@ -32,10 +32,10 @@ public class FilteringSpanExporter implements SpanExporter {
     }
 
     @Override
-    public CompletableResult export(Collection<SpanData> spans) {
+    public CompletableResultCode export(Collection<SpanData> spans) {
         if (flagdClient.shouldSuppressInternal()) {
             List<SpanData> filtered = spans.stream()
-                    .filter(span -> span.getKind() != io.opentelemetry.trace.SpanKind.INTERNAL)
+                    .filter(span -> span.getKind() != io.opentelemetry.api.trace.SpanKind.INTERNAL)
                     .collect(Collectors.toList());
             return delegate.export(filtered);
         }
@@ -43,12 +43,12 @@ public class FilteringSpanExporter implements SpanExporter {
     }
 
     @Override
-    public CompletableResult flush() {
+    public CompletableResultCode flush() {
         return delegate.flush();
     }
 
     @Override
-    public CompletableResult shutdown() {
+    public CompletableResultCode shutdown() {
         return delegate.shutdown();
     }
 }
