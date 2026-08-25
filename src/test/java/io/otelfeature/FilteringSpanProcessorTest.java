@@ -344,21 +344,14 @@ class FilteringSpanProcessorTest {
     @Test
     @DisplayName("ReparentingSpanExporter is transparent when registry is empty")
     void reparentingExporterTransparentWhenEmpty() {
-        InMemoryExporter delegate = new InMemoryExporter();
-        SuppressedSpanRegistry emptyRegistry = new SuppressedSpanRegistry();
-        ReparentingSpanExporter exporter = new ReparentingSpanExporter(delegate, emptyRegistry);
+        setUpPipeline();
+        // No suppression active → registry empty → exporter should passthrough
+        flagdClient.setSuppress(false);
+        tracer.spanBuilder("server-span").setSpanKind(SpanKind.SERVER).startSpan().end();
 
-        List<SpanData> spans = List.of(
-                io.opentelemetry.sdk.trace.data.SpanData.builder()
-                        .setName("test").setSpanId("0123456789abcdef0")
-                        .setTraceId("0123456789abcdef0123456789abcdef")
-                        .setKind(SpanKind.SERVER)
-                        .setStartEpochNanos(0).setEndEpochNanos(1)
-                        .build());
+        assertEquals(1, inMemoryExporter.count());
+        assertEquals("server-span", inMemoryExporter.spans.get(0).getName());
 
-        exporter.export(spans);
-
-        assertEquals(1, delegate.count());
-        assertEquals("test", delegate.spans.get(0).getName());
+        tearDown();
     }
 }
