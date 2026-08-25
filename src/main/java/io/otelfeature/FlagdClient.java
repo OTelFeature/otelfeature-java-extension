@@ -1,15 +1,16 @@
 package io.otelfeature;
 
-import java.time.Duration;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -22,9 +23,11 @@ import java.util.logging.Logger;
  * suppressed (filtered out before export). When the value is {@code "FULL"}
  * (or when flagd is unreachable), it returns {@code false}.
  *
- * <p>Uses only the JDK's built-in {@link java.net.http.HttpClient} — no
- * external dependencies — so the extension JAR stays lightweight and doesn't
- * conflict with the agent's classloader.
+ * <p>Uses {@link HttpURLConnection} instead of {@link java.net.http.HttpClient}
+ * to avoid classloader conflicts with the OTel agent's HTTP client
+ * instrumentation. The extension runs in the agent's extension classloader,
+ * where the agent's bytecode-instrumented {@code HttpClient} can cause
+ * connection failures.
  *
  * <p>Configuration via environment variables:
  * <ul>
@@ -44,43 +47,63 @@ public class FlagdClient {
             System.getenv().getOrDefault("FLAGD_POLL_INTERVAL_SECONDS", "5"));
     private static final String FLAG_NAME = System.getenv().getOrDefault("OTELFEATURE_FLAG_NAME", "telemetryLevel");
 
-    private final HttpClient httpClient;
     private final ScheduledExecutorService scheduler;
     private final AtomicReference<Boolean> suppressInternal = new AtomicReference<>(false);
 
     public FlagdClient() {
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "otelfeature-flagd-poller");
             t.setDaemon(true);
             return t;
         });
 
-        // Poll immediately, then at fixed interval
-        poll();
-        scheduler.scheduleAtFixedRate(this::poll, POLL_INTERVAL, POLL_INTERVAL, TimeUnit.SECONDS);
+        // Poll immediately, then at fixed interval.
+        // Wrap in a try-catch so no exception can kill the scheduled task.
+        Runnable safePoll = () -> {
+            try {
+                poll();
+            } catch (Throwable t) {
+                log.log(Level.WARNING, "otelfeature-java-extension: unexpected error polling flagd", t);
+            }
+        };
+
+        safePoll.run();
+        scheduler.scheduleAtFixedRate(safePoll, POLL_INTERVAL, POLL_INTERVAL, TimeUnit.SECONDS);
 
         log.info("otelfeature-java-extension: polling flagd at " + FLAGD_HOST + ":" + FLAGD_PORT
                 + " every " + POLL_INTERVAL + "s for flag '" + FLAG_NAME + "'");
     }
 
     private void poll() {
+        HttpURLConnection conn = null;
         try {
             URI uri = URI.create(String.format("http://%s:%d/ofrep/v1/evaluate/flags/%s",
                     FLAGD_HOST, FLAGD_PORT, FLAG_NAME));
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(uri)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"context\":{}}"))
-                    .build();
+            conn = (HttpURLConnection) uri.toURL().openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setDoOutput(true);
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write("{\"context\":{}}".getBytes(StandardCharsets.UTF_8));
+            }
 
-            if (response.statusCode() == 200) {
-                String value = extractValue(response.body());
+            int status = conn.getResponseCode();
+
+            if (status == 200) {
+                StringBuilder body = new StringBuilder();
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        body.append(line);
+                    }
+                }
+
+                String value = extractValue(body.toString());
                 boolean shouldSuppress = "IO".equalsIgnoreCase(value);
                 boolean previous = suppressInternal.getAndSet(shouldSuppress);
 
@@ -89,7 +112,7 @@ public class FlagdClient {
                             + "' — INTERNAL spans " + (shouldSuppress ? "suppressed" : "visible"));
                 }
             } else {
-                log.fine("otelfeature-java-extension: flagd returned status " + response.statusCode()
+                log.fine("otelfeature-java-extension: flagd returned status " + status
                         + " — defaulting to no suppression");
                 suppressInternal.set(false);
             }
@@ -97,6 +120,10 @@ public class FlagdClient {
             log.fine("otelfeature-java-extension: failed to poll flagd (" + FLAGD_HOST + ":" + FLAGD_PORT
                     + ") — " + e.getMessage());
             // Keep the last known value — don't flip on transient errors
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
@@ -106,7 +133,6 @@ public class FlagdClient {
      * dependency-free.
      */
     private String extractValue(String json) {
-        // Matches "value":"SOME_VALUE" in the response
         java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
                 "\"value\"\\s*:\\s*\"([^\"]*)\"").matcher(json);
         return matcher.find() ? matcher.group(1) : null;
