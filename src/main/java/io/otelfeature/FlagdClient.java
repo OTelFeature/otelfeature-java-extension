@@ -6,7 +6,6 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -50,14 +49,31 @@ public class FlagdClient {
     private final ScheduledExecutorService scheduler;
     private final AtomicReference<Boolean> suppressInternal = new AtomicReference<>(false);
 
+    /**
+     * Creates a FlagdClient and starts polling flagd in the background.
+     */
     public FlagdClient() {
+        this(false);
+    }
+
+    /**
+     * Internal constructor for testing. When {@code testMode} is {@code true},
+     * no HTTP polling is started and {@link #shouldSuppressInternal()}
+     * returns {@code false} until overridden by a test subclass.
+     *
+     * @param testMode {@code true} to skip background polling
+     */
+    FlagdClient(boolean testMode) {
+        if (testMode) {
+            this.scheduler = null;
+            return;
+        }
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "otelfeature-flagd-poller");
             t.setDaemon(true);
             return t;
         });
 
-        // Poll immediately, then at fixed interval.
         // Wrap in a try-catch so no exception can kill the scheduled task.
         Runnable safePoll = () -> {
             try {
@@ -67,8 +83,9 @@ public class FlagdClient {
             }
         };
 
-        safePoll.run();
-        scheduler.scheduleAtFixedRate(safePoll, POLL_INTERVAL, POLL_INTERVAL, TimeUnit.SECONDS);
+        // Schedule first poll immediately on the background thread (non-blocking).
+        // Until the first poll completes, shouldSuppressInternal() returns false (no suppression).
+        scheduler.scheduleAtFixedRate(safePoll, 0, POLL_INTERVAL, TimeUnit.SECONDS);
 
         log.info("otelfeature-java-extension: polling flagd at " + FLAGD_HOST + ":" + FLAGD_PORT
                 + " every " + POLL_INTERVAL + "s for flag '" + FLAG_NAME + "'");
@@ -149,5 +166,15 @@ public class FlagdClient {
      */
     public boolean shouldSuppressInternal() {
         return suppressInternal.get();
+    }
+
+    /**
+     * Shuts down the background polling thread.
+     * No-op in test mode.
+     */
+    public void shutdown() {
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+        }
     }
 }

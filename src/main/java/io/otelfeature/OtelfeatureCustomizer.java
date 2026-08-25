@@ -2,16 +2,19 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
-import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 
 /**
  * SPI entry point for the otelfeature-java-extension.
  *
  * <p>Registered via {@code META-INF/services/} and discovered by the OTel
- * Java agent at startup. Wraps the configured {@link
- * io.opentelemetry.sdk.trace.export.SpanExporter SpanExporter} with a
- * {@link FilteringSpanExporter} that suppresses {@code INTERNAL} spans
+ * Java agent at startup. Wraps the auto-configured {@link
+ * io.opentelemetry.sdk.trace.SpanProcessor SpanProcessor} with a
+ * {@link FilteringSpanProcessor} that suppresses {@code INTERNAL} spans
  * based on the {@code telemetryLevel} flag served by flagd.
+ *
+ * <p>Filtering at the {@code SpanProcessor} level (before batching) is more
+ * performant than exporter-level filtering: dropped spans never enter the
+ * batch queue, saving memory and CPU.
  *
  * <p>This is the Java equivalent of the Python {@code otelfeature-instrument}
  * launcher — it adds flagd-controlled span suppression to any Java service
@@ -36,7 +39,7 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
         FlagdClient flagdClient = new FlagdClient();
 
-        autoConfiguration.addSpanExporterCustomizer(
-                (exporter, config) -> new FilteringSpanExporter(exporter, flagdClient));
+        autoConfiguration.addSpanProcessorCustomizer(
+                (processor, config) -> new FilteringSpanProcessor(processor, flagdClient));
     }
 }
