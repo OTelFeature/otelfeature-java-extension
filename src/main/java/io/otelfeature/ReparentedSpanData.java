@@ -103,6 +103,12 @@ class ReparentedSpanData implements SpanData {
     }
 
     @Override
+    @Deprecated
+    public io.opentelemetry.sdk.common.InstrumentationLibraryInfo getInstrumentationLibraryInfo() {
+        return delegate.getInstrumentationLibraryInfo();
+    }
+
+    @Override
     public Resource getResource() {
         return delegate.getResource();
     }
