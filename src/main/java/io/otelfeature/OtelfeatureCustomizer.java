@@ -2,6 +2,7 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 
 /**
  * SPI entry point for the otelfeature-java-extension.
@@ -36,6 +37,6 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
         FlagdClient flagdClient = new FlagdClient();
 
         autoConfiguration.addSpanExporterCustomizer(
-                exporter -> new FilteringSpanExporter(exporter, flagdClient));
+                (exporter, config) -> new FilteringSpanExporter(exporter, flagdClient));
     }
 }
