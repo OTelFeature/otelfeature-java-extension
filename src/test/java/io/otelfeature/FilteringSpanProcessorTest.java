@@ -207,14 +207,16 @@ class FilteringSpanProcessorTest {
         }
         server.end();
 
-        // Only server and client should be exported (internal dropped)
+        // Only server and client should be exported (internal dropped).
+        // SimpleSpanProcessor exports synchronously on end(), so child spans
+        // (client) appear before their parents (server) in the export order.
         assertEquals(2, inMemoryExporter.count());
-        assertEquals("server", inMemoryExporter.spans.get(0).getName());
-        assertEquals("client", inMemoryExporter.spans.get(1).getName());
+        assertEquals("client", inMemoryExporter.spans.get(0).getName());
+        assertEquals("server", inMemoryExporter.spans.get(1).getName());
 
         // The client's parent should be the server, not the internal span
-        SpanData serverData = inMemoryExporter.spans.get(0);
-        SpanData clientData = inMemoryExporter.spans.get(1);
+        SpanData clientData = inMemoryExporter.spans.get(0);
+        SpanData serverData = inMemoryExporter.spans.get(1);
 
         assertEquals(serverData.getSpanId(), clientData.getParentSpanContext().getSpanId(),
                 "client should be re-parented to server");
@@ -252,10 +254,12 @@ class FilteringSpanProcessorTest {
         }
         server.end();
 
-        // Only server and client should be exported
+        // Only server and client should be exported.
+        // SimpleSpanProcessor exports synchronously on end(), so client
+        // (ended first) appears before server (ended last).
         assertEquals(2, inMemoryExporter.count());
-        SpanData serverData = inMemoryExporter.spans.get(0);
-        SpanData clientData = inMemoryExporter.spans.get(1);
+        SpanData clientData = inMemoryExporter.spans.get(0);
+        SpanData serverData = inMemoryExporter.spans.get(1);
 
         assertEquals(serverData.getSpanId(), clientData.getParentSpanContext().getSpanId(),
                 "client should be re-parented to server (skipping both internal spans)");
@@ -306,8 +310,8 @@ class FilteringSpanProcessorTest {
     }
 
     @Test
-    @DisplayName("isStartRequired delegates to delegate")
-    void isStartRequiredDelegates() {
+    @DisplayName("isStartRequired always returns true")
+    void isStartRequiredAlwaysTrue() {
         CountingProcessor delegate = new CountingProcessor();
         FilteringSpanProcessor processor =
                 new FilteringSpanProcessor(delegate, new TestFlagdClient(), new SuppressedSpanRegistry());
