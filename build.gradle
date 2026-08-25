@@ -31,6 +31,10 @@ dependencies {
     testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.65.0'
 }
 
+jar {
+    archiveFileName = 'otelfeature-java-extension.jar'
+}
+
 test {
     useJUnitPlatform()
 }

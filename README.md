@@ -100,7 +100,7 @@ spans exported) and keeps the last known value on transient errors.
 
 ```sh
 gradle build --no-daemon
-# Output: build/libs/otelfeature-java-extension-0.2.1.jar
+# Output: build/libs/otelfeature-java-extension.jar
 ```
 
 Requires Java 21+ and Gradle 8+.
