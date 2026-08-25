@@ -16,6 +16,7 @@
 
 package io.otelfeature;
 
+import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.sdk.common.CompletableResultCode;
@@ -33,11 +34,9 @@ import io.opentelemetry.sdk.trace.SpanProcessor;
  * (so its context is valid for child propagation), but it is never batched,
  * serialized, or sent over the network.
  *
- * <p>Children of suppressed spans are <strong>not</strong> re-parented. They
- * retain their original parent span ID, which may reference a span that was
- * not exported. This is the same behavior as any sampling scenario (e.g.,
- * probabilistic sampling at &lt;100%) and is handled gracefully by trace
- * backends such as Jaeger, Tempo, and Datadog.
+ * <p>When a span is dropped, its ID and parent context are recorded in a
+ * {@link SuppressedSpanRegistry} so that {@link ReparentingSpanExporter} can
+ * re-parent surviving children to the nearest non-suppressed ancestor.
  *
  * <p>When suppression is inactive, all spans are passed through unchanged
  * with minimal overhead: one {@code AtomicReference.get()} (volatile read)
@@ -47,10 +46,13 @@ public class FilteringSpanProcessor implements SpanProcessor {
 
     private final SpanProcessor delegate;
     private final FlagdClient flagdClient;
+    private final SuppressedSpanRegistry registry;
 
-    public FilteringSpanProcessor(SpanProcessor delegate, FlagdClient flagdClient) {
+    public FilteringSpanProcessor(SpanProcessor delegate, FlagdClient flagdClient,
+                                  SuppressedSpanRegistry registry) {
         this.delegate = delegate;
         this.flagdClient = flagdClient;
+        this.registry = registry;
     }
 
     @Override
@@ -66,6 +68,11 @@ public class FilteringSpanProcessor implements SpanProcessor {
     @Override
     public void onEnd(ReadableSpan span) {
         if (flagdClient.shouldSuppressInternal() && span.getKind() == SpanKind.INTERNAL) {
+            // Record this span's ID → parent context so children can be re-parented
+            SpanContext parentContext = span.getParentSpanContext();
+            if (parentContext != null && parentContext.isValid()) {
+                registry.record(span.getSpanContext().getSpanId(), parentContext);
+            }
             return; // drop — don't forward to delegate (BatchSpanProcessor)
         }
         delegate.onEnd(span);

@@ -23,19 +23,19 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  * SPI entry point for the otelfeature-java-extension.
  *
  * <p>Registered via {@code META-INF/services/} and discovered by the OTel
- * Java agent at startup. Wraps the auto-configured {@link
- * io.opentelemetry.sdk.trace.SpanProcessor SpanProcessor} with a
- * {@link FilteringSpanProcessor} that suppresses {@code INTERNAL} spans
- * based on the {@code telemetryLevel} flag served by flagd.
+ * Java agent at startup. It installs two cooperating components:
  *
- * <p>Filtering at the {@code SpanProcessor} level (before batching) is more
- * performant than exporter-level filtering: dropped spans never enter the
- * batch queue, saving memory and CPU.
+ * <ol>
+ *   <li><b>FilteringSpanProcessor</b> (via {@code addSpanProcessorCustomizer}):
+ *       drops {@code INTERNAL} spans before they enter the batch queue when
+ *       suppression is active. Records dropped span IDs in a shared registry.</li>
+ *   <li><b>ReparentingSpanExporter</b> (via {@code addSpanExporterCustomizer}):
+ *       re-parents surviving spans whose parents were suppressed, using the
+ *       shared registry to resolve the nearest non-suppressed ancestor.</li>
+ * </ol>
  *
- * <p>This is the Java equivalent of the Python {@code otelfeature-instrument}
- * launcher — it adds flagd-controlled span suppression to any Java service
- * running under the OTel Java agent, with zero code changes to the service
- * itself.
+ * <p>This two-layer approach gives both performance (dropped spans never
+ * batched) and correctness (children re-parented, trace hierarchy preserved).
  *
  * <p>Usage:
  * <pre>
@@ -54,8 +54,12 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
     @Override
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
         FlagdClient flagdClient = new FlagdClient();
+        SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
 
         autoConfiguration.addSpanProcessorCustomizer(
-                (processor, config) -> new FilteringSpanProcessor(processor, flagdClient));
+                (processor, config) -> new FilteringSpanProcessor(processor, flagdClient, registry));
+
+        autoConfiguration.addSpanExporterCustomizer(
+                (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
     }
 }

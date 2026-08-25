@@ -18,8 +18,10 @@ package io.otelfeature;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -39,10 +41,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for {@link FilteringSpanProcessor} using the real OTel SDK
- * with an in-memory exporter (no Mockito required).
+ * Unit tests for {@link FilteringSpanProcessor} and {@link ReparentingSpanExporter}
+ * using the real OTel SDK with an in-memory exporter.
  */
-@DisplayName("FilteringSpanProcessor")
+@DisplayName("FilteringSpanProcessor + ReparentingSpanExporter")
 class FilteringSpanProcessorTest {
 
     /** A simple in-memory span exporter for testing. */
@@ -74,7 +76,7 @@ class FilteringSpanProcessorTest {
         private volatile boolean suppress = false;
 
         TestFlagdClient() {
-            super(true); // skip background polling
+            super(true);
         }
 
         @Override
@@ -117,16 +119,21 @@ class FilteringSpanProcessorTest {
     }
 
     private TestFlagdClient flagdClient;
-    private InMemoryExporter exporter;
+    private SuppressedSpanRegistry registry;
+    private InMemoryExporter inMemoryExporter;
+    private ReparentingSpanExporter reparentingExporter;
     private SdkTracerProvider tracerProvider;
     private Tracer tracer;
 
     private void setUpPipeline() {
-        exporter = new InMemoryExporter();
+        inMemoryExporter = new InMemoryExporter();
+        registry = new SuppressedSpanRegistry();
         flagdClient = new TestFlagdClient();
+        reparentingExporter = new ReparentingSpanExporter(inMemoryExporter, registry);
 
-        SpanProcessor simpleProcessor = SimpleSpanProcessor.create(exporter);
-        FilteringSpanProcessor filterProcessor = new FilteringSpanProcessor(simpleProcessor, flagdClient);
+        SpanProcessor simpleProcessor = SimpleSpanProcessor.create(reparentingExporter);
+        FilteringSpanProcessor filterProcessor =
+                new FilteringSpanProcessor(simpleProcessor, flagdClient, registry);
 
         tracerProvider = SdkTracerProvider.builder()
                 .addSpanProcessor(filterProcessor)
@@ -152,10 +159,10 @@ class FilteringSpanProcessorTest {
         tracer.spanBuilder("client-span").setSpanKind(SpanKind.CLIENT).startSpan().end();
         tracer.spanBuilder("internal-span").setSpanKind(SpanKind.INTERNAL).startSpan().end();
 
-        assertEquals(3, exporter.count());
-        assertEquals("server-span", exporter.spans.get(0).getName());
-        assertEquals("client-span", exporter.spans.get(1).getName());
-        assertEquals("internal-span", exporter.spans.get(2).getName());
+        assertEquals(3, inMemoryExporter.count());
+        assertEquals("server-span", inMemoryExporter.spans.get(0).getName());
+        assertEquals("client-span", inMemoryExporter.spans.get(1).getName());
+        assertEquals("internal-span", inMemoryExporter.spans.get(2).getName());
 
         tearDown();
     }
@@ -171,36 +178,87 @@ class FilteringSpanProcessorTest {
         tracer.spanBuilder("internal-span").setSpanKind(SpanKind.INTERNAL).startSpan().end();
         tracer.spanBuilder("another-internal").setSpanKind(SpanKind.INTERNAL).startSpan().end();
 
-        assertEquals(2, exporter.count());
-        assertEquals("server-span", exporter.spans.get(0).getName());
-        assertEquals("client-span", exporter.spans.get(1).getName());
-        assertTrue(exporter.spans.stream().noneMatch(s -> s.getKind() == SpanKind.INTERNAL));
+        assertEquals(2, inMemoryExporter.count());
+        assertEquals("server-span", inMemoryExporter.spans.get(0).getName());
+        assertEquals("client-span", inMemoryExporter.spans.get(1).getName());
+        assertTrue(inMemoryExporter.spans.stream().noneMatch(s -> s.getKind() == SpanKind.INTERNAL));
 
         tearDown();
     }
 
     @Test
-    @DisplayName("children of suppressed INTERNAL spans are still exported")
-    void childrenOfSuppressedAreExported() {
+    @DisplayName("children of suppressed INTERNAL spans are re-parented to grandparent")
+    void childrenReparentedToGrandparent() {
         setUpPipeline();
         flagdClient.setSuppress(true);
 
-        var parent = tracer.spanBuilder("parent-internal")
-                .setSpanKind(SpanKind.INTERNAL)
-                .startSpan();
+        // Create: SERVER → INTERNAL (suppressed) → CLIENT (should be re-parented to SERVER)
+        Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
+        Span internal;
+        Span client;
 
-        try (var scope = parent.makeCurrent()) {
-            tracer.spanBuilder("child-server")
-                    .setSpanKind(SpanKind.SERVER)
-                    .startSpan()
-                    .end();
-        } finally {
-            parent.end();
+        try (var scope1 = server.makeCurrent()) {
+            internal = tracer.spanBuilder("internal").setSpanKind(SpanKind.INTERNAL).startSpan();
+            try (var scope2 = internal.makeCurrent()) {
+                client = tracer.spanBuilder("client").setSpanKind(SpanKind.CLIENT).startSpan();
+                client.end();
+            }
+            internal.end();
         }
+        server.end();
 
-        assertEquals(1, exporter.count());
-        assertEquals("child-server", exporter.spans.get(0).getName());
-        assertEquals(SpanKind.SERVER, exporter.spans.get(0).getKind());
+        // Only server and client should be exported (internal dropped)
+        assertEquals(2, inMemoryExporter.count());
+        assertEquals("server", inMemoryExporter.spans.get(0).getName());
+        assertEquals("client", inMemoryExporter.spans.get(1).getName());
+
+        // The client's parent should be the server, not the internal span
+        SpanData serverData = inMemoryExporter.spans.get(0);
+        SpanData clientData = inMemoryExporter.spans.get(1);
+
+        assertEquals(serverData.getSpanId(), clientData.getParentSpanContext().getSpanId(),
+                "client should be re-parented to server");
+        assertNotEquals(internal.getSpanContext().getSpanId(),
+                        clientData.getParentSpanContext().getSpanId(),
+                        "client should NOT reference the suppressed internal span");
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("nested INTERNAL spans: child re-parented to nearest non-suppressed ancestor")
+    void nestedInternalSpansReparented() {
+        setUpPipeline();
+        flagdClient.setSuppress(true);
+
+        // Create: SERVER → INTERNAL_A (suppressed) → INTERNAL_B (suppressed) → CLIENT
+        // CLIENT should be re-parented to SERVER
+        Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
+        Span internalA;
+        Span internalB;
+        Span client;
+
+        try (var s1 = server.makeCurrent()) {
+            internalA = tracer.spanBuilder("internal-a").setSpanKind(SpanKind.INTERNAL).startSpan();
+            try (var s2 = internalA.makeCurrent()) {
+                internalB = tracer.spanBuilder("internal-b").setSpanKind(SpanKind.INTERNAL).startSpan();
+                try (var s3 = internalB.makeCurrent()) {
+                    client = tracer.spanBuilder("client").setSpanKind(SpanKind.CLIENT).startSpan();
+                    client.end();
+                }
+                internalB.end();
+            }
+            internalA.end();
+        }
+        server.end();
+
+        // Only server and client should be exported
+        assertEquals(2, inMemoryExporter.count());
+        SpanData serverData = inMemoryExporter.spans.get(0);
+        SpanData clientData = inMemoryExporter.spans.get(1);
+
+        assertEquals(serverData.getSpanId(), clientData.getParentSpanContext().getSpanId(),
+                "client should be re-parented to server (skipping both internal spans)");
 
         tearDown();
     }
@@ -210,20 +268,17 @@ class FilteringSpanProcessorTest {
     void flagToggleTakesEffect() {
         setUpPipeline();
 
-        // Suppression off → INTERNAL exported
         flagdClient.setSuppress(false);
         tracer.spanBuilder("internal-1").setSpanKind(SpanKind.INTERNAL).startSpan().end();
-        assertEquals(1, exporter.count());
+        assertEquals(1, inMemoryExporter.count());
 
-        // Toggle on → INTERNAL dropped
         flagdClient.setSuppress(true);
         tracer.spanBuilder("internal-2").setSpanKind(SpanKind.INTERNAL).startSpan().end();
-        assertEquals(1, exporter.count()); // still 1
+        assertEquals(1, inMemoryExporter.count());
 
-        // Toggle off → INTERNAL exported again
         flagdClient.setSuppress(false);
         tracer.spanBuilder("internal-3").setSpanKind(SpanKind.INTERNAL).startSpan().end();
-        assertEquals(2, exporter.count());
+        assertEquals(2, inMemoryExporter.count());
 
         tearDown();
     }
@@ -235,15 +290,15 @@ class FilteringSpanProcessorTest {
         flagdClient.setSuppress(true);
 
         for (SpanKind kind : SpanKind.values()) {
-            exporter.clear();
+            inMemoryExporter.clear();
             String name = "span-" + kind.name();
             tracer.spanBuilder(name).setSpanKind(kind).startSpan().end();
 
             if (kind == SpanKind.INTERNAL) {
-                assertEquals(0, exporter.count(), kind + " should be dropped");
+                assertEquals(0, inMemoryExporter.count(), kind + " should be dropped");
             } else {
-                assertEquals(1, exporter.count(), kind + " should be exported");
-                assertEquals(name, exporter.spans.get(0).getName());
+                assertEquals(1, inMemoryExporter.count(), kind + " should be exported");
+                assertEquals(name, inMemoryExporter.spans.get(0).getName());
             }
         }
 
@@ -254,8 +309,8 @@ class FilteringSpanProcessorTest {
     @DisplayName("isStartRequired delegates to delegate")
     void isStartRequiredDelegates() {
         CountingProcessor delegate = new CountingProcessor();
-        FilteringSpanProcessor processor = new FilteringSpanProcessor(delegate, new TestFlagdClient());
-
+        FilteringSpanProcessor processor =
+                new FilteringSpanProcessor(delegate, new TestFlagdClient(), new SuppressedSpanRegistry());
         assertTrue(processor.isStartRequired());
     }
 
@@ -263,8 +318,8 @@ class FilteringSpanProcessorTest {
     @DisplayName("isEndRequired always returns true")
     void isEndRequiredAlwaysTrue() {
         CountingProcessor delegate = new CountingProcessor();
-        FilteringSpanProcessor processor = new FilteringSpanProcessor(delegate, new TestFlagdClient());
-
+        FilteringSpanProcessor processor =
+                new FilteringSpanProcessor(delegate, new TestFlagdClient(), new SuppressedSpanRegistry());
         assertTrue(processor.isEndRequired());
     }
 
@@ -272,19 +327,38 @@ class FilteringSpanProcessorTest {
     @DisplayName("shutdown delegates to delegate")
     void shutdownDelegates() {
         CountingProcessor delegate = new CountingProcessor();
-        FilteringSpanProcessor processor = new FilteringSpanProcessor(delegate, new TestFlagdClient());
-
-        CompletableResultCode result = processor.shutdown();
-        assertTrue(result.isSuccess());
+        FilteringSpanProcessor processor =
+                new FilteringSpanProcessor(delegate, new TestFlagdClient(), new SuppressedSpanRegistry());
+        assertTrue(processor.shutdown().isSuccess());
     }
 
     @Test
     @DisplayName("forceFlush delegates to delegate")
     void forceFlushDelegates() {
         CountingProcessor delegate = new CountingProcessor();
-        FilteringSpanProcessor processor = new FilteringSpanProcessor(delegate, new TestFlagdClient());
+        FilteringSpanProcessor processor =
+                new FilteringSpanProcessor(delegate, new TestFlagdClient(), new SuppressedSpanRegistry());
+        assertTrue(processor.forceFlush().isSuccess());
+    }
 
-        CompletableResultCode result = processor.forceFlush();
-        assertTrue(result.isSuccess());
+    @Test
+    @DisplayName("ReparentingSpanExporter is transparent when registry is empty")
+    void reparentingExporterTransparentWhenEmpty() {
+        InMemoryExporter delegate = new InMemoryExporter();
+        SuppressedSpanRegistry emptyRegistry = new SuppressedSpanRegistry();
+        ReparentingSpanExporter exporter = new ReparentingSpanExporter(delegate, emptyRegistry);
+
+        List<SpanData> spans = List.of(
+                io.opentelemetry.sdk.trace.data.SpanData.builder()
+                        .setName("test").setSpanId("0123456789abcdef0")
+                        .setTraceId("0123456789abcdef0123456789abcdef")
+                        .setKind(SpanKind.SERVER)
+                        .setStartEpochNanos(0).setEndEpochNanos(1)
+                        .build());
+
+        exporter.export(spans);
+
+        assertEquals(1, delegate.count());
+        assertEquals("test", delegate.spans.get(0).getName());
     }
 }
