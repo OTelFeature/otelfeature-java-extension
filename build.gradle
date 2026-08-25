@@ -24,6 +24,7 @@ dependencies {
 
     // Test dependencies
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
     testImplementation 'io.opentelemetry:opentelemetry-api:1.44.0'
     testImplementation 'io.opentelemetry:opentelemetry-sdk:1.44.0'
     testImplementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.44.0'
