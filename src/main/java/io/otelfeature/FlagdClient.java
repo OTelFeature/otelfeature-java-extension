@@ -10,8 +10,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Polls flagd's OFREP REST endpoint for the {@code telemetryLevel} flag and
@@ -36,7 +36,7 @@ import org.slf4j.LoggerFactory;
  */
 public class FlagdClient {
 
-    private static final Logger log = LoggerFactory.getLogger(FlagdClient.class);
+    private static final Logger log = Logger.getLogger(FlagdClient.class.getName());
 
     private static final String FLAGD_HOST = System.getenv().getOrDefault("FLAGD_HOST", "flagd");
     private static final int FLAGD_PORT = Integer.parseInt(System.getenv().getOrDefault("FLAGD_PORT", "8016"));
@@ -62,8 +62,8 @@ public class FlagdClient {
         poll();
         scheduler.scheduleAtFixedRate(this::poll, POLL_INTERVAL, POLL_INTERVAL, TimeUnit.SECONDS);
 
-        log.info("otelfeature-java-extension: polling flagd at {}:{} every {}s for flag '{}'",
-                FLAGD_HOST, FLAGD_PORT, POLL_INTERVAL, FLAG_NAME);
+        log.info("otelfeature-java-extension: polling flagd at " + FLAGD_HOST + ":" + FLAGD_PORT
+                + " every " + POLL_INTERVAL + "s for flag '" + FLAG_NAME + "'");
     }
 
     private void poll() {
@@ -85,17 +85,17 @@ public class FlagdClient {
                 boolean previous = suppressInternal.getAndSet(shouldSuppress);
 
                 if (previous != shouldSuppress) {
-                    log.info("otelfeature-java-extension: telemetryLevel changed to '{}' — INTERNAL spans {}",
-                            value, shouldSuppress ? "suppressed" : "visible");
+                    log.info("otelfeature-java-extension: telemetryLevel changed to '" + value
+                            + "' — INTERNAL spans " + (shouldSuppress ? "suppressed" : "visible"));
                 }
             } else {
-                log.debug("otelfeature-java-extension: flagd returned status {} — defaulting to no suppression",
-                        response.statusCode());
+                log.fine("otelfeature-java-extension: flagd returned status " + response.statusCode()
+                        + " — defaulting to no suppression");
                 suppressInternal.set(false);
             }
         } catch (Exception e) {
-            log.debug("otelfeature-java-extension: failed to poll flagd ({}:{}) — {}",
-                    FLAGD_HOST, FLAGD_PORT, e.getMessage());
+            log.fine("otelfeature-java-extension: failed to poll flagd (" + FLAGD_HOST + ":" + FLAGD_PORT
+                    + ") — " + e.getMessage());
             // Keep the last known value — don't flip on transient errors
         }
     }
