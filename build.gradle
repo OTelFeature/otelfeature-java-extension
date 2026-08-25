@@ -16,9 +16,10 @@ repositories {
 }
 
 dependencies {
-    // The OTel SDK and autoconfigure SPI are provided by the agent at runtime.
-    // We only need them at compile time.
+    // The OTel SDK, autoconfigure SPI, and SLF4J are provided by the agent
+    // at runtime. We only need them at compile time.
     compileOnly 'io.opentelemetry:opentelemetry-api:1.44.0'
     compileOnly 'io.opentelemetry:opentelemetry-sdk:1.44.0'
     compileOnly 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.44.0'
+    compileOnly 'org.slf4j:slf4j-api:2.0.16'
 }
