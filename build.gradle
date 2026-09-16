@@ -1,9 +1,14 @@
 plugins {
     id 'java-library'
+    // Produces the single self-contained extension JAR. Needed even though
+    // nothing is relocated: gRPC discovers ManagedChannelProvider and
+    // NameResolverProvider through META-INF/services, and a naive fat JAR would
+    // let one dependency's service file overwrite another's.
+    id 'com.gradleup.shadow' version '9.6.1'
 }
 
 group = 'io.otelfeature'
-version = '0.2.3'
+version = '0.3.0'
 
 java {
     toolchain {
@@ -22,6 +27,19 @@ dependencies {
     compileOnly 'io.opentelemetry:opentelemetry-sdk:1.65.0'
     compileOnly 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.65.0'
 
+    // Bundled into the extension JAR: the agent provides none of this.
+    implementation 'dev.openfeature:sdk:1.22.1'
+    implementation('dev.openfeature.contrib.providers:flagd:0.14.2') {
+        // The agent supplies opentelemetry-api at runtime, and relocates the
+        // io.opentelemetry references inside extension classes to match. A
+        // second copy shipped in here would be a different set of classes.
+        exclude group: 'io.opentelemetry'
+    }
+    // The flagd provider logs through SLF4J. Without a binding it prints a
+    // "no providers found" warning and silently discards its own diagnostics;
+    // route it to JUL, which is what the rest of this extension already uses.
+    runtimeOnly 'org.slf4j:slf4j-jdk14:2.0.19'
+
     // Test dependencies
     testImplementation 'org.junit.jupiter:junit-jupiter:6.1.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:6.1.3'
@@ -31,9 +49,26 @@ dependencies {
     testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.65.0'
 }
 
+// The thin JAR would otherwise compete with shadowJar for the same file name.
 jar {
-    archiveFileName = 'otelfeature-java-extension.jar'
+    archiveClassifier = 'thin'
 }
+
+shadowJar {
+    archiveClassifier = ''
+    archiveFileName = 'otelfeature-java-extension.jar'
+
+    // Must come before mergeServiceFiles(): shadow's default EXCLUDE strategy
+    // drops duplicate entries before the service-file transformer ever sees
+    // them, which silently reduces META-INF/services/io.grpc.NameResolverProvider
+    // to whichever dependency happened to be copied first - losing gRPC's DNS
+    // resolver, and with it the ability to resolve "flagd:8015" at all.
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    mergeServiceFiles()
+}
+
+// So `gradle build` produces the extension JAR, not just the thin one.
+assemble.dependsOn shadowJar
 
 test {
     useJUnitPlatform()

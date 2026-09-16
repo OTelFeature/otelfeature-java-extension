@@ -38,35 +38,50 @@ import io.opentelemetry.sdk.trace.SpanProcessor;
  * {@link SuppressedSpanRegistry} so that {@link ReparentingSpanExporter} can
  * re-parent surviving children to the nearest non-suppressed ancestor.
  *
- * <p>When suppression is inactive, all spans are passed through unchanged
- * with minimal overhead: one {@code AtomicReference.get()} (volatile read)
- * and one enum comparison per span.
+ * <p>The suppression decision is made <b>once per span, at {@code onStart}</b>,
+ * and {@code onEnd} then consults the registry rather than asking the flag a
+ * second time. Two independent evaluations of the same span could legitimately
+ * disagree - the flag can be flipped, or targeted so that it resolves per
+ * evaluation - and a span recorded as suppressed at start but exported at end
+ * (or the reverse) would corrupt the parent chain. Asking once also halves the
+ * evaluations.
+ *
+ * <p>When suppression is inactive, all spans are passed through unchanged with
+ * minimal overhead: for a static flag that is one volatile read and one enum
+ * comparison per span, with no flag evaluation at all - see
+ * {@link TelemetryLevelResolver}.
  */
 public class FilteringSpanProcessor implements SpanProcessor {
 
     private final SpanProcessor delegate;
-    private final FlagdClient flagdClient;
+    private final TelemetryLevelSource telemetryLevel;
     private final SuppressedSpanRegistry registry;
 
-    public FilteringSpanProcessor(SpanProcessor delegate, FlagdClient flagdClient,
+    public FilteringSpanProcessor(SpanProcessor delegate, TelemetryLevelSource telemetryLevel,
                                   SuppressedSpanRegistry registry) {
         this.delegate = delegate;
-        this.flagdClient = flagdClient;
+        this.telemetryLevel = telemetryLevel;
         this.registry = registry;
     }
 
     @Override
     public void onStart(Context parentContext, ReadWriteSpan span) {
-        // Pre-record suppressed INTERNAL spans in the registry at onStart time,
-        // so that ReparentingSpanExporter can re-parent surviving children
-        // before this span ends and is dropped. With SimpleSpanProcessor (and
-        // even BatchSpanProcessor), children are typically exported before
-        // their parents end, so recording at onEnd would be too late.
-        if (flagdClient.shouldSuppressInternal() && span.getKind() == SpanKind.INTERNAL) {
+        // Record suppressed INTERNAL spans in the registry at onStart time, so
+        // that ReparentingSpanExporter can re-parent surviving children before
+        // this span ends and is dropped. With SimpleSpanProcessor (and even
+        // BatchSpanProcessor), children are typically exported before their
+        // parents end, so recording at onEnd would be too late.
+        //
+        // This is also where the decision is taken for the span's whole
+        // lifetime: onEnd reads the registry instead of the flag.
+        if (span.getKind() == SpanKind.INTERNAL && telemetryLevel.shouldSuppressInternal()) {
             SpanContext parent = span.getParentSpanContext();
-            if (parent != null && parent.isValid()) {
-                registry.record(span.getSpanContext().getSpanId(), parent);
-            }
+            // A suppressed root span is recorded against an invalid parent, so
+            // onEnd can still find it and its children are promoted to roots
+            // rather than pointing at a span that was never exported.
+            registry.record(
+                    span.getSpanContext().getSpanId(),
+                    parent != null && parent.isValid() ? parent : SpanContext.getInvalid());
         }
         delegate.onStart(parentContext, span);
     }
@@ -80,8 +95,10 @@ public class FilteringSpanProcessor implements SpanProcessor {
 
     @Override
     public void onEnd(ReadableSpan span) {
-        if (flagdClient.shouldSuppressInternal() && span.getKind() == SpanKind.INTERNAL) {
-            // Drop — registry entry was already made in onStart()
+        // Deliberately the registry and not the flag: the decision belongs to
+        // onStart, and re-asking could answer differently for the same span.
+        if (span.getKind() == SpanKind.INTERNAL
+                && registry.isSuppressed(span.getSpanContext().getSpanId())) {
             return; // don't forward to delegate (BatchSpanProcessor)
         }
         delegate.onEnd(span);

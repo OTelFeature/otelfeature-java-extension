@@ -29,7 +29,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>The registry is bounded to prevent unbounded memory growth. When the
  * maximum size is reached, the registry is cleared entirely — a safety valve
- * that should never trigger in normal operation.
+ * that should never trigger in normal operation. A span whose entry is dropped
+ * by that clear between its start and its end is exported rather than
+ * suppressed, which is the safe direction to fail in.
  */
 class SuppressedSpanRegistry {
 
@@ -49,6 +51,19 @@ class SuppressedSpanRegistry {
             map.clear();
         }
         map.put(spanId, parentContext);
+    }
+
+    /**
+     * Whether a span was suppressed at {@code onStart}.
+     *
+     * <p>{@link FilteringSpanProcessor#onEnd} uses this instead of re-reading
+     * the feature flag, so a span's fate is decided exactly once.
+     *
+     * @param spanId the span ID to check
+     * @return {@code true} if the span was recorded as suppressed
+     */
+    boolean isSuppressed(String spanId) {
+        return map.containsKey(spanId);
     }
 
     /**
