@@ -101,14 +101,13 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
         // flagd being reachable. Until the provider is ready the flag resolves
         // to its default, which is "suppress nothing".
         api.setProvider(new FlagdProvider(options));
-
-        log.info("otelfeature-java-extension: syncing flag '" + flagKey + "' from flagd");
     }
 
     private static FlagdOptions inProcessOptions() {
         String host = env("FLAGD_HOST", DEFAULT_HOST);
         int port = envPort(DEFAULT_SYNC_PORT);
-        log.info("otelfeature-java-extension: flagd in-process sync stream at " + host + ":" + port);
+        log.info("otelfeature-java-extension: resolving '" + env("OTELFEATURE_FLAG_NAME", "telemetryLevel")
+                + "' from flagd's in-process sync stream at " + host + ":" + port);
         return FlagdOptions.builder()
                 .resolverType(Config.Resolver.IN_PROCESS)
                 .host(host)

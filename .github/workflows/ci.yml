@@ -32,6 +32,28 @@ jobs:
       - name: Build and test
         run: gradle build --no-daemon
 
+      - name: Verify shaded service files
+        # This has already failed silently once: shadow's default EXCLUDE
+        # duplicates strategy dropped gRPC's DnsNameResolverProvider before
+        # mergeServiceFiles() could merge it, leaving the extension unable to
+        # resolve "flagd:8015" - and neither the compiler nor the tests
+        # noticed. A plugin upgrade could reintroduce it just as quietly.
+        run: |
+          jar=build/libs/otelfeature-java-extension.jar
+          check() {
+            if unzip -p "$jar" "META-INF/services/$1" | grep -qF "$2"; then
+              echo "ok: $1 provides $2"
+            else
+              echo "::error::$jar: META-INF/services/$1 does not list $2"
+              exit 1
+            fi
+          }
+          # Without this one the extension is never discovered by the agent.
+          check io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider io.otelfeature.OtelfeatureCustomizer
+          # Without these the gRPC channel to flagd cannot be built or resolved.
+          check io.grpc.ManagedChannelProvider NettyChannelProvider
+          check io.grpc.NameResolverProvider DnsNameResolverProvider
+
       - name: Upload JAR artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

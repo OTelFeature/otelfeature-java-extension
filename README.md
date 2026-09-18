@@ -155,7 +155,8 @@ gradle build --no-daemon
 # Output: build/libs/otelfeature-java-extension.jar
 ```
 
-Requires Java 21+ and Gradle 8+.
+Requires Java 21+ and Gradle 9+ (the shadow plugin's floor; CI pins
+9.7.1 rather than relying on whatever the runner image ships).
 
 ## Dependencies
 
