@@ -28,7 +28,10 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  * <ol>
  *   <li><b>FilteringSpanProcessor</b> (via {@code addSpanProcessorCustomizer}):
  *       drops {@code INTERNAL} spans before they enter the batch queue when
- *       suppression is active. Records dropped span IDs in a shared registry.</li>
+ *       suppression is active. Records dropped span IDs in a shared registry.
+ *       It asks {@link FlagdTelemetryLevel}, which syncs the flag ruleset
+ *       in-process from flagd and evaluates it only as often as the flag
+ *       actually requires - see {@link TelemetryLevelResolver}.</li>
  *   <li><b>ReparentingSpanExporter</b> (via {@code addSpanExporterCustomizer}):
  *       re-parents surviving spans whose parents were suppressed, using the
  *       shared registry to resolve the nearest non-suppressed ancestor.</li>
@@ -53,13 +56,18 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
 
     @Override
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
-        FlagdClient flagdClient = new FlagdClient();
+        FlagdTelemetryLevel telemetryLevel = new FlagdTelemetryLevel();
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
 
         autoConfiguration.addSpanProcessorCustomizer(
-                (processor, config) -> new FilteringSpanProcessor(processor, flagdClient, registry));
+                (processor, config) -> new FilteringSpanProcessor(processor, telemetryLevel, registry));
 
         autoConfiguration.addSpanExporterCustomizer(
                 (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
+
+        // The provider holds a gRPC channel to flagd; close it on the way out
+        // rather than leaving the sync stream to be torn down by the JVM.
+        Runtime.getRuntime().addShutdownHook(new Thread(telemetryLevel::shutdown,
+                "otelfeature-shutdown"));
     }
 }
