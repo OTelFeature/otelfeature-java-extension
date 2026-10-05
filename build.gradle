@@ -38,7 +38,7 @@ dependencies {
     // The flagd provider logs through SLF4J. Without a binding it prints a
     // "no providers found" warning and silently discards its own diagnostics;
     // route it to JUL, which is what the rest of this extension already uses.
-    runtimeOnly 'org.slf4j:slf4j-jdk14:2.0.19'
+    runtimeOnly 'org.slf4j:slf4j-jdk14:2.0.20'
 
     // Test dependencies
     testImplementation 'org.junit.jupiter:junit-jupiter:6.1.3'
