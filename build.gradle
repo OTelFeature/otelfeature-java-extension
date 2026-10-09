@@ -28,7 +28,7 @@ dependencies {
     compileOnly 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.66.0'
 
     // Bundled into the extension JAR: the agent provides none of this.
-    implementation 'dev.openfeature:sdk:1.22.1'
+    implementation 'dev.openfeature:sdk:1.23.0'
     implementation('dev.openfeature.contrib.providers:flagd:0.14.2') {
         // The agent supplies opentelemetry-api at runtime, and relocates the
         // io.opentelemetry references inside extension classes to match. A
