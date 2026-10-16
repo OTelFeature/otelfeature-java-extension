@@ -551,15 +551,17 @@ Releases are GitHub Releases with `otelfeature-java-extension.jar`
 attached. Pushing a `v*` tag runs the `release` job in
 [ci.yml](.github/workflows/ci.yml): it checks that the tag matches the
 `version` in `build.gradle` (`v0.4.0` for `0.4.0`), builds and tests in the
-`ci/Dockerfile` toolchain image, and creates the release. Tags like
-`v0.4.0-rc.1` (with the same version in `build.gradle`) become
-pre-releases; that is how unreleased code reaches the demo stage, which only
+`ci/Dockerfile` toolchain image, and creates the release. A release
+candidate tag of the same version, `v0.4.0-rc.1`, is accepted too and becomes
+a pre-release; that is how unreleased code reaches the demo stage, which only
 uses released versions (spec C-006 in OTelFeature/poc).
 
 To cut a release: bump `version` in `build.gradle` in a PR, merge it, then
-push the tag from `main`:
+push a release candidate from `main` to rehearse the pipeline, and the real
+tag once the candidate's release looks right:
 
 ```sh
+git tag v0.4.0-rc.1 && git push origin v0.4.0-rc.1
 git tag v0.4.0 && git push origin v0.4.0
 ```
 

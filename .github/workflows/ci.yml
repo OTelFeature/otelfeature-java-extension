@@ -76,17 +76,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The tag must match build.gradle: v0.4.0 for version '0.4.0',
-      # v0.4.0-rc.1 for version '0.4.0-rc.1'.
+      # The tag must match build.gradle: v0.4.0 for version '0.4.0'. A
+      # release candidate v0.4.0-rc.N of the same version is accepted too and
+      # becomes a pre-release, so the release path can be rehearsed first.
       - name: Check tag matches build.gradle version
         env:
           TAG: ${{ github.ref_name }}
         run: |
           version=$(sed -n "s/^version = '\(.*\)'$/\1/p" build.gradle)
-          if [ "v$version" != "$TAG" ]; then
-            echo "::error::tag $TAG does not match build.gradle version $version"
-            exit 1
-          fi
+          case "$TAG" in
+            "v$version"|"v$version"-rc.[0-9]*) ;;
+            *) echo "::error::tag $TAG does not match build.gradle version $version"; exit 1 ;;
+          esac
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
