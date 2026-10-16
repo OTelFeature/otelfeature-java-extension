@@ -5,14 +5,19 @@ IMAGE ?= otelfeature-java-extension-ci
 DOCKER ?= docker
 
 # Run as the host user, so build output in the mounted repo isn't root's.
-# HOME points somewhere writable for that user, who has no home in the image.
-RUN_IN_IMAGE = $(DOCKER) run --rm $(TTY) \
-	--user "$$(id -u):$$(id -g)" -e HOME=/tmp \
-	-v "$(CURDIR)":/src -w /src \
-	$(IMAGE)
+# Rootless Docker/Podman already map container root to the host user: use
+# DOCKER_USER=0:0 there. HOME points somewhere writable for any uid.
+DOCKER_USER ?= $(shell id -u):$(shell id -g)
 
-# An interactive terminal only when there is one (not in CI).
-TTY := $(shell [ -t 0 ] && echo -it)
+# An interactive terminal only when there is one on both ends (not in CI,
+# not when piped into tee). Checked by the recipe's own shell: inside
+# $(shell ...) stdout is a pipe, so the test there would always say no.
+TTY = $$([ -t 0 ] && [ -t 1 ] && echo -it)
+
+DOCKER_RUN = $(DOCKER) run --rm --user "$(DOCKER_USER)" -e HOME=/tmp \
+	-v "$(CURDIR)":/src -w /src
+
+RUN_IN_IMAGE = $(DOCKER_RUN) $(TTY) $(IMAGE)
 
 .PHONY: image test jar shell clean
 
@@ -34,8 +39,8 @@ jar: image
 
 ## shell: a shell in the toolchain image, with the repo mounted at /src
 shell: image
-	$(DOCKER) run --rm -it --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR)":/src -w /src $(IMAGE) bash
+	$(DOCKER_RUN) -it $(IMAGE) bash
 
-## clean: remove build output
-clean: image
-	$(RUN_IN_IMAGE) $(GRADLE) clean
+## clean: remove build output (it is the host user's; no image needed)
+clean:
+	rm -rf build .gradle

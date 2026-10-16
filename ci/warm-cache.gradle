@@ -6,16 +6,13 @@
 // would still miss them. Resolving each resolvable configuration fetches the
 // files too. Plugins (shadow) are already on the build script classpath by
 // the time this runs.
+//
+// A failed resolution fails the image build, on purpose: a cached image with a
+// gap would only fail later, offline, with a far less helpful message.
 allprojects {
     afterEvaluate { project ->
         project.configurations
                 .findAll { it.canBeResolved }
-                .each { configuration ->
-                    try {
-                        configuration.resolve()
-                    } catch (Exception e) {
-                        logger.warn("warm-cache: skipped ${project.path}:${configuration.name}: ${e.message}")
-                    }
-                }
+                .each { it.resolve() }
     }
 }

@@ -39,7 +39,12 @@ RUN GRADLE_USER_HOME=/tmp/warm gradle --init-script /opt/warm-cache.gradle help 
     && rm -f /opt/gradle-ro-cache/modules-2/gc.properties \
     && chmod -R a+rX /opt/gradle-ro-cache \
     && rm -rf /tmp/warm /src/* /src/.gradle
-ENV GRADLE_RO_DEP_CACHE=/opt/gradle-ro-cache
+# Every run gets a fresh, writable Gradle home of its own, whatever its uid:
+# Java takes user.home from passwd, not $HOME, and uid 1000 *is* the image's
+# `gradle` user (home /home/gradle, a VOLUME), while CI's uid 1001 has no
+# entry at all. Set explicitly, local runs and CI take the same path.
+ENV GRADLE_RO_DEP_CACHE=/opt/gradle-ro-cache \
+    GRADLE_USER_HOME=/tmp/gradle-home
 
 CMD ["gradle", "build", "--no-daemon", "--offline"]
 

@@ -562,14 +562,17 @@ make shell   # a shell in the toolchain image, repo mounted at /src
   `build.gradle` / `settings.gradle` rebuilds its dependency layer. Builds in
   it run `--offline`, so a dependency missing from the image fails loudly
   instead of being downloaded on every run.
-- Everything runs as your user, so `build/` stays yours (not root's).
+- Everything runs as your user, so `build/` stays yours (not root's). With
+  **rootless Docker or Podman**, where container root already *is* your user,
+  run `make test DOCKER_USER=0:0`.
 - To build the JAR from a git ref without a checkout (as the
   [poc](https://github.com/OTelFeature/poc) end-to-end suite does), use the
   `jar` stage (JAR at `/out/otelfeature-java-extension.jar`) or the `artifact`
-  stage:
+  stage. Any ref that contains `ci/Dockerfile` works:
 
   ```sh
-  docker build --target artifact --output type=local,dest=out -f ci/Dockerfile     https://github.com/OTelFeature/otelfeature-java-extension.git#main
+  docker build --target artifact --output type=local,dest=out -f ci/Dockerfile \
+    https://github.com/OTelFeature/otelfeature-java-extension.git#main
   ```
 
 Without Docker, `gradle build` works too, with Java 21+ and Gradle 9+ (the
