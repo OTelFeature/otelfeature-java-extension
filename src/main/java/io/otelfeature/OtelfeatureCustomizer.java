@@ -39,6 +39,10 @@ import java.util.logging.Logger;
  *       shared registry to resolve the nearest non-suppressed ancestor.</li>
  * </ol>
  *
+ * <p>With {@code OTELFEATURE_ENFORCEMENT=sampler} a third one joins them:
+ * <b>FlagAwareSampler</b> (via {@code addSamplerCustomizer}) drops local roots
+ * while tracing is disabled, before the span exists. See {@link Enforcement}.
+ *
  * <p>This two-layer approach gives both performance (dropped spans never
  * batched) and correctness (children re-parented, trace hierarchy preserved).
  *
@@ -71,9 +75,19 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
         }
         FlagdTelemetryPolicy policy = new FlagdTelemetryPolicy();
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
+        Enforcement mode = Enforcement.fromEnvironment();
+        Logger.getLogger(OtelfeatureCustomizer.class.getName()).info(
+                "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
+                        + " (" + Enforcement.ENV + ")");
 
+        if (mode == Enforcement.SAMPLER) {
+            autoConfiguration.addSamplerCustomizer(
+                    (sampler, config) -> new FlagAwareSampler(sampler, policy));
+        }
+
+        TelemetryPolicySource processorPolicy = processorPolicy(policy, mode);
         autoConfiguration.addSpanProcessorCustomizer(
-                (processor, config) -> new FilteringSpanProcessor(processor, policy, registry));
+                (processor, config) -> new FilteringSpanProcessor(processor, processorPolicy, registry));
 
         autoConfiguration.addSpanExporterCustomizer(
                 (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
@@ -82,5 +96,24 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
         // rather than leaving the sync stream to be torn down by the JVM.
         Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
                 "otelfeature-shutdown"));
+    }
+
+    /**
+     * What {@link FilteringSpanProcessor} enforces in each mode.
+     *
+     * <p>In sampler mode {@code enabled} belongs to {@link FlagAwareSampler}
+     * alone: it drops local roots, and a trace that was already sampled when
+     * the flag flipped is left to finish whole rather than lose its tail at
+     * the processor. The processor keeps {@code suppressInternal} in both modes.
+     *
+     * @param policy the full policy
+     * @param mode where {@code enabled} is enforced
+     * @return the policy the processor should apply
+     */
+    static TelemetryPolicySource processorPolicy(TelemetryPolicySource policy, Enforcement mode) {
+        if (mode == Enforcement.PROCESSOR) {
+            return policy;
+        }
+        return () -> TelemetryPolicy.of(true, policy.policy().suppressInternal());
     }
 }

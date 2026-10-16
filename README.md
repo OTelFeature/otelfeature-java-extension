@@ -48,16 +48,22 @@ span. Only traces are affected: metrics and logs carry on regardless.
 even a flagd connection), and the agent's disabled SDK exports nothing.
 
 > [!IMPORTANT]
-> **`OFF` is suppression, not an SDK disable.** In Java, spans are still
-> created, populated and propagated by the agent, then dropped in
-> `FilteringSpanProcessor` before they reach the batch queue. So `OFF` (and
-> `otelEnabled=false`) saves **export** — batching, serialisation, network,
-> backend cost — but **not** the instrumentation's CPU. That changes when
-> [OTelFeature/otelfeature-java-extension#21](https://github.com/OTelFeature/otelfeature-java-extension/issues/21)
-> lands and root spans are dropped at the sampler instead.
+> **`OFF` is suppression, not an SDK disable.** Where it is enforced depends on
+> [`OTELFEATURE_ENFORCEMENT`](#enforcement-processor-or-sampler):
 >
-> Context propagation keeps working while tracing is off, so a trace resumes
-> coherently the moment the flag is flipped back: a span that survives is
+> - `processor` (default): spans are still created, populated and propagated
+>   by the agent, then dropped in `FilteringSpanProcessor` before they reach
+>   the batch queue. This saves **export** — batching, serialisation, network,
+>   backend cost — but **not** the instrumentation's CPU.
+> - `sampler`: `FlagAwareSampler` drops every local root before it exists, and
+>   its subtree with it. Dropped spans are never recorded: no attributes, no
+>   events, no processor or export work. The instrumentation hooks themselves
+>   still run and hand out non-recording spans, so CPU drops by however much of
+>   it went into recording; [OTelFeature/poc#27](https://github.com/OTelFeature/poc/issues/27)
+>   measures that.
+>
+> In `processor` mode, context propagation keeps working while tracing is off,
+> so a trace resumes coherently the moment the flag is flipped back: a span that survives is
 > re-parented past any ancestor dropped while `OFF`, the same way children of
 > suppressed `INTERNAL` spans are. Propagation also has a cost: see
 > [Known limitations](#known-limitations).
@@ -67,22 +73,52 @@ even a flagd connection), and the agent's disabled SDK exports nothing.
 `OFF` / `otelEnabled=false` is kept for completeness, with these trade-offs
 known and accepted:
 
-- **Gaps in traces that cross services.** While `OFF`, outgoing calls still
+- **Gaps in traces that cross services (`processor` mode).** While `OFF`, outgoing calls still
   carry `traceparent` with the *sampled* flag set, because the spans are only
   dropped after they have been created and propagated. A downstream service
   that is still tracing (for example with the default parent-based sampler)
   keeps recording and exports spans whose parent never reaches the backend.
   Those traces show up with a missing parent or root. The same applies to the
   surviving half of a trace when the flag is flipped part-way through a request.
-- **No CPU saving in Java.** See above. Both points change with
-  [#21](https://github.com/OTelFeature/otelfeature-java-extension/issues/21):
-  dropping at the sampler marks the context *not sampled*, so downstream
-  services stop sampling too. That is a behaviour change worth calling out when
-  it lands.
+- **No CPU saving in `processor` mode.** See above. `sampler` mode changes
+  both points: a dropped root marks the context *not sampled*, so downstream
+  services stop sampling too. The trace is then cut off at this service rather
+  than orphaned below it.
 - **Spans that never end.** The registry of suppressed spans is bounded by
   sweeping out spans that have already ended. It only falls back to clearing
   everything — briefly letting in-flight spans through — if 100,000 suppressed
   spans are open at once, which means instrumentation is leaking spans.
+
+### Enforcement: processor or sampler
+
+`OTELFEATURE_ENFORCEMENT` picks where `OFF` / `otelEnabled=false` is enforced.
+It is read once at startup. Both modes are kept until the measurements in
+[OTelFeature/poc#27](https://github.com/OTelFeature/poc/issues/27) decide
+between them.
+
+| | `processor` (default) | `sampler` |
+|---|---|---|
+| What drops a span | `FilteringSpanProcessor.onEnd` | `FlagAwareSampler`, before the span exists |
+| Which spans `OFF` drops | every span | every **local root** (no parent, or a remote parent) and so its whole subtree |
+| Cost of dropped spans | fully paid (created, populated, then dropped) | only the non-recording span the instrumentation still asks for |
+| `traceparent` sent downstream while `OFF` | `sampled=1` → downstream orphans | `sampled=0` → downstream stops too |
+| Flag flipped mid-request | the rest of the trace is dropped | the trace finishes whole, the next one is dropped |
+| `telemetryLevel=IO` (`INTERNAL`) | processor | processor (unchanged) |
+
+```sh
+OTELFEATURE_ENFORCEMENT=sampler java -javaagent:opentelemetry-javaagent.jar ...
+```
+
+**The subtree caveat.** A sampler `DROP` is never just one span. The span's
+context carries `sampled=0`, the agent's default parent-based sampler then
+drops every descendant, and every outgoing call tells downstream services to do
+the same. That is exactly right for `OFF`, and for spans that are roots or
+leaves anyway (a health-check request, a DB call). It is wrong for anything
+mid-trace, which is why `INTERNAL` suppression stays in the processor in both
+modes: there, a dropped span's children survive and are re-parented. The
+sampler wraps whatever sampler the agent is configured with; when tracing is
+enabled, that sampler decides exactly as before (`getDescription()` reports
+`FlagAwareSampler{delegate=...}`).
 
 ## How it works
 
@@ -209,6 +245,7 @@ java -javaagent:opentelemetry-javaagent.jar -jar your-app.jar
 | `FLAGD_PORT`                          | `8015`           | flagd gRPC **sync** port (in-process resolver)  |
 | `OTELFEATURE_FLAG_NAME`               | `telemetryLevel` | flagd key of the level flag (`FULL`/`IO`/`OFF`) |
 | `OTELFEATURE_ENABLED_FLAG_NAME`       | `otelEnabled`    | flagd key of the boolean kill switch            |
+| `OTELFEATURE_ENFORCEMENT`             | `processor`      | `processor` or `sampler`, see [Enforcement](#enforcement-processor-or-sampler) |
 
 > [!IMPORTANT]
 > `FLAGD_PORT` now defaults to flagd's gRPC **sync** port `8015`, not the OFREP
@@ -285,7 +322,7 @@ shipping a second one.
 | Instrumentation approach | SDK configurator | `-javaagent` bytecode instrumentation |
 | flagd connection | gRPC (in-process resolver, port 8015) | gRPC (in-process resolver, port 8015) |
 | Span suppression | Configures tracer to not emit INTERNAL spans | Filters INTERNAL spans at SpanProcessor level (before batching) |
-| `OFF` / `otelEnabled=false` | Suppressed at span creation: saves export **and** CPU | Dropped at `onEnd`: saves export, **not** CPU (until #21) |
+| `OFF` / `otelEnabled=false` | Suppressed at span creation: saves export **and** CPU | `processor`: dropped at `onEnd`, saves export, **not** CPU; `sampler`: roots never created, saves both |
 | Flag updates | Push (gRPC sync stream) | Push (gRPC sync stream) |
 | Flag evaluation | Once while static, per span while targeted | Once while static, per span while targeted |
 | Service code changes | None | None |
