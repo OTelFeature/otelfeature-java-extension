@@ -29,7 +29,7 @@ import java.util.List;
 
 /**
  * A delegating {@link SpanData} wrapper that overrides the parent span context
- * to support re-parenting when an INTERNAL span is suppressed.
+ * to support re-parenting when an ancestor span is suppressed.
  *
  * <p>All other attributes are delegated to the original {@link SpanData}.
  */

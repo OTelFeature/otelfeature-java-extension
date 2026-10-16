@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -73,14 +74,17 @@ class FilteringSpanProcessorTest {
 
     /** A telemetry level that is whatever the test says it is. */
     static class TestTelemetryLevel implements TelemetryLevelSource {
-        private volatile boolean suppress = false;
+        private volatile TelemetryLevel level = TelemetryLevel.FULL;
 
         @Override
-        public boolean shouldSuppressInternal() {
-            return suppress;
+        public TelemetryLevel level() {
+            return level;
         }
 
-        void setSuppress(boolean s) { this.suppress = s; }
+        /** {@code true} is {@code IO} (suppress INTERNAL), {@code false} is {@code FULL}. */
+        void setSuppress(boolean s) { this.level = s ? TelemetryLevel.IO : TelemetryLevel.FULL; }
+
+        void setLevel(TelemetryLevel level) { this.level = level; }
     }
 
     /** A counting SpanProcessor to verify delegation. */
@@ -119,8 +123,12 @@ class FilteringSpanProcessorTest {
     private Tracer tracer;
 
     private void setUpPipeline() {
+        setUpPipeline(new SuppressedSpanRegistry());
+    }
+
+    private void setUpPipeline(SuppressedSpanRegistry registry) {
         inMemoryExporter = new InMemoryExporter();
-        registry = new SuppressedSpanRegistry();
+        this.registry = registry;
         telemetryLevel = new TestTelemetryLevel();
         reparentingExporter = new ReparentingSpanExporter(inMemoryExporter, registry);
 
@@ -402,5 +410,176 @@ class FilteringSpanProcessorTest {
                 "client should be a root, not a child of the suppressed span");
 
         tearDown();
+    }
+
+    // ----------------------------------------------------------------------
+    // OFF
+    // ----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("OFF drops every span kind")
+    void offDropsEveryKind() {
+        setUpPipeline();
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+
+        for (SpanKind kind : SpanKind.values()) {
+            tracer.spanBuilder("span-" + kind.name()).setSpanKind(kind).startSpan().end();
+        }
+
+        assertEquals(0, inMemoryExporter.count(), "nothing may be exported while OFF");
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("OFF drops a whole trace, root and children alike")
+    void offDropsWholeTrace() {
+        setUpPipeline();
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+
+        Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
+        try (var s1 = server.makeCurrent()) {
+            Span internal = tracer.spanBuilder("internal").setSpanKind(SpanKind.INTERNAL).startSpan();
+            try (var s2 = internal.makeCurrent()) {
+                tracer.spanBuilder("client").setSpanKind(SpanKind.CLIENT).startSpan().end();
+            }
+            internal.end();
+        }
+        server.end();
+
+        assertEquals(0, inMemoryExporter.count());
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("switching OFF and back to FULL takes effect on the next span")
+    void offAndBackOn() {
+        setUpPipeline();
+
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        tracer.spanBuilder("dropped").setSpanKind(SpanKind.SERVER).startSpan().end();
+        assertEquals(0, inMemoryExporter.count());
+
+        telemetryLevel.setLevel(TelemetryLevel.FULL);
+        tracer.spanBuilder("kept").setSpanKind(SpanKind.SERVER).startSpan().end();
+        assertEquals(1, inMemoryExporter.count());
+        assertEquals("kept", inMemoryExporter.spans.get(0).getName());
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("under OFF a SERVER span's fate is still decided at onStart")
+    void offDecisionIsStableAcrossTheSpanLifetime() {
+        setUpPipeline();
+
+        // Started while OFF, ended after tracing came back: stays dropped.
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        Span dropped = tracer.spanBuilder("dropped").setSpanKind(SpanKind.SERVER).startSpan();
+        telemetryLevel.setLevel(TelemetryLevel.FULL);
+        dropped.end();
+        assertEquals(0, inMemoryExporter.count(), "span suppressed at start must stay suppressed");
+
+        // Started while FULL, ended after the switch went OFF: stays exported.
+        Span kept = tracer.spanBuilder("kept").setSpanKind(SpanKind.SERVER).startSpan();
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        kept.end();
+        assertEquals(1, inMemoryExporter.count(), "span visible at start must stay visible");
+        assertEquals("kept", inMemoryExporter.spans.get(0).getName());
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("a trace that resumes after OFF re-parents past the spans dropped while OFF")
+    void traceResumesAfterOff() {
+        setUpPipeline();
+
+        // SERVER started while FULL; then OFF drops the INTERNAL started under
+        // it; tracing comes back before the CLIENT starts. The client must hang
+        // off the server, not off the span nobody exported.
+        Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
+        try (var s1 = server.makeCurrent()) {
+            telemetryLevel.setLevel(TelemetryLevel.OFF);
+            Span internal = tracer.spanBuilder("internal").setSpanKind(SpanKind.INTERNAL).startSpan();
+            telemetryLevel.setLevel(TelemetryLevel.FULL);
+            try (var s2 = internal.makeCurrent()) {
+                tracer.spanBuilder("client").setSpanKind(SpanKind.CLIENT).startSpan().end();
+            }
+            internal.end();
+        }
+        server.end();
+
+        assertEquals(2, inMemoryExporter.count());
+        SpanData clientData = inMemoryExporter.spans.get(0);
+        SpanData serverData = inMemoryExporter.spans.get(1);
+        assertEquals("client", clientData.getName());
+        assertEquals(serverData.getSpanId(), clientData.getParentSpanContext().getSpanId(),
+                "client should be re-parented to server");
+
+        tearDown();
+    }
+
+    // ----------------------------------------------------------------------
+    // Registry bound under OFF
+    // ----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("under OFF a long-running span stays dropped however many spans pass by")
+    void longRunningSpanSurvivesRegistrySweeps() {
+        // Tiny limits, so the 1000 spans below force dozens of sweeps.
+        setUpPipeline(new SuppressedSpanRegistry(10, 10_000));
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+
+        Span longRunning = tracer.spanBuilder("long-running").setSpanKind(SpanKind.SERVER).startSpan();
+        for (int i = 0; i < 1000; i++) {
+            tracer.spanBuilder("short-" + i).setSpanKind(SpanKind.CLIENT).startSpan().end();
+        }
+        longRunning.end();
+
+        assertEquals(0, inMemoryExporter.count(), "nothing may leak while OFF");
+        assertTrue(registry.size() < 30,
+                "ended spans should have been swept, size was " + registry.size());
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("a sweep drops ended entries and keeps in-flight ones")
+    void sweepKeepsInFlightEntries() {
+        SuppressedSpanRegistry registry = new SuppressedSpanRegistry(3, 1000);
+        SpanContext root = SpanContext.getInvalid();
+
+        registry.record("inflight", root);
+        registry.record("ended-1", root);
+        registry.record("ended-2", root);
+        registry.markEnded("ended-1");
+        registry.markEnded("ended-2");
+
+        registry.record("new", root); // size 3 reaches sweepAt: sweeps first
+
+        assertTrue(registry.isSuppressed("inflight"));
+        assertTrue(registry.isSuppressed("new"));
+        assertFalse(registry.isSuppressed("ended-1"));
+        assertFalse(registry.isSuppressed("ended-2"));
+        assertEquals(2, registry.size());
+    }
+
+    @Test
+    @DisplayName("only spans that never end make the registry clear itself")
+    void hardMaxClearsAsLastResort() {
+        SuppressedSpanRegistry registry = new SuppressedSpanRegistry(2, 4);
+        SpanContext root = SpanContext.getInvalid();
+
+        for (int i = 0; i < 4; i++) {
+            registry.record("leaked-" + i, root);
+        }
+        assertEquals(4, registry.size(), "in-flight entries survive sweeps below hardMax");
+
+        registry.record("next", root); // 4 in flight reaches hardMax: cleared
+
+        assertEquals(1, registry.size());
+        assertTrue(registry.isSuppressed("next"));
     }
 }

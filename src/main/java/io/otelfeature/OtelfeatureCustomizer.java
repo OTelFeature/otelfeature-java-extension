@@ -27,8 +27,9 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  *
  * <ol>
  *   <li><b>FilteringSpanProcessor</b> (via {@code addSpanProcessorCustomizer}):
- *       drops {@code INTERNAL} spans before they enter the batch queue when
- *       suppression is active. Records dropped span IDs in a shared registry.
+ *       drops spans before they enter the batch queue when suppression is
+ *       active ({@code INTERNAL} at {@code IO}, all of them at {@code OFF}).
+ *       Records dropped span IDs in a shared registry.
  *       It asks {@link FlagdTelemetryLevel}, which syncs the flag ruleset
  *       in-process from flagd and evaluates it only as often as the flag
  *       actually requires - see {@link TelemetryLevelResolver}.</li>

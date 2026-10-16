@@ -18,7 +18,7 @@ package io.otelfeature;
 
 /**
  * Answers the one question {@link FilteringSpanProcessor} asks of the feature
- * flag: should {@code INTERNAL} spans be suppressed right now?
+ * flags: how much tracing is allowed right now?
  *
  * <p>Deliberately one method, and deliberately not tied to OpenFeature: the
  * span processor has no business knowing where the answer comes from, and a
@@ -28,14 +28,15 @@ package io.otelfeature;
 public interface TelemetryLevelSource {
 
     /**
-     * Returns {@code true} if {@code INTERNAL} spans should be suppressed.
+     * Returns the current telemetry level.
      *
      * <p>Called on the span hot path, from whatever thread created the span, so
-     * implementations must be thread-safe and cheap.
+     * implementations must be thread-safe and cheap, and must fail open: an
+     * unresolvable flag means {@link TelemetryLevel#FULL}.
      *
-     * @return {@code true} if INTERNAL spans should be filtered out
+     * @return the level the next span is subject to
      */
-    boolean shouldSuppressInternal();
+    TelemetryLevel level();
 
     /** Releases whatever backs this source. The default does nothing. */
     default void shutdown() {}

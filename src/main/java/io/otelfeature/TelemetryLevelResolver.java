@@ -26,9 +26,9 @@ import java.util.function.Function;
 import java.util.logging.Logger;
 
 /**
- * Decides how often {@code telemetryLevel} actually has to be evaluated.
+ * Decides how often a telemetry flag actually has to be evaluated.
  *
- * <p>The flag is asked about on every span, but most of the time the answer
+ * <p>The flags are asked about on every span, but most of the time the answer
  * cannot have changed since the last one: a flag with no {@code targeting}
  * block is one {@code defaultVariant} for the whole world. flagd says exactly
  * that, in the resolution reason:
@@ -48,37 +48,68 @@ import java.util.logging.Logger;
  * only {@code STATIC} - is kept, and every subsequent span is then answered
  * from an {@link AtomicReference} with no evaluation and no hook chain at all.
  * Any other reason means the value can depend on who is asking, so
- * {@link #shouldSuppressInternal()} evaluates for every span.
+ * {@link #level()} evaluates for every span.
  *
  * <p>{@code classify} is driven by the provider's own events (see
- * {@link FlagdTelemetryLevel}), so attaching a {@code targeting} block to
- * {@code telemetryLevel} makes the next classification report
- * {@code TARGETING_MATCH}, caching switches itself off, and spans start being
- * evaluated individually. Remove the targeting and caching resumes by itself.
+ * {@link FlagdTelemetryLevel}), so attaching a {@code targeting} block to the
+ * flag makes the next classification report {@code TARGETING_MATCH}, caching
+ * switches itself off, and spans start being evaluated individually. Remove the
+ * targeting and caching resumes by itself.
+ *
+ * <p>The same rule serves both flags: {@code telemetryLevel} (a string variant,
+ * see {@link #telemetryLevel}) and {@code otelEnabled} (a boolean kill switch,
+ * see {@link #otelEnabled}). Each is turned into a {@link TelemetryLevel} by its
+ * own interpretation, and {@link FlagdTelemetryLevel} combines the two.
+ *
+ * @param <T> the flag's value type
  */
-final class TelemetryLevelResolver implements TelemetryLevelSource {
+final class TelemetryLevelResolver<T> implements TelemetryLevelSource {
 
     private static final Logger log = Logger.getLogger(TelemetryLevelResolver.class.getName());
 
-    /** Variant value that means "suppress INTERNAL spans". */
-    static final String SUPPRESS_VALUE = "IO";
-
-    /** Returned when the flag cannot be resolved: show everything. */
+    /** {@code telemetryLevel} when it cannot be resolved: show everything. */
     static final String DEFAULT_VALUE = "FULL";
 
+    /** {@code otelEnabled} when it cannot be resolved: tracing stays on. */
+    static final Boolean DEFAULT_ENABLED = Boolean.TRUE;
+
     private final String flagKey;
-    private final Function<EvaluationContext, FlagEvaluationDetails<String>> evaluate;
+    private final Function<EvaluationContext, FlagEvaluationDetails<T>> evaluate;
+    private final Function<T, TelemetryLevel> interpret;
 
     /**
      * The kept answer, or {@code null} for "not cacheable, evaluate per span".
      * Written by the provider's event thread, read by every span.
      */
-    private final AtomicReference<Boolean> cached = new AtomicReference<>();
+    private final AtomicReference<TelemetryLevel> cached = new AtomicReference<>();
 
     TelemetryLevelResolver(
-            String flagKey, Function<EvaluationContext, FlagEvaluationDetails<String>> evaluate) {
+            String flagKey,
+            Function<EvaluationContext, FlagEvaluationDetails<T>> evaluate,
+            Function<T, TelemetryLevel> interpret) {
         this.flagKey = flagKey;
         this.evaluate = evaluate;
+        this.interpret = interpret;
+    }
+
+    /**
+     * A resolver for the {@code telemetryLevel} string flag: {@code FULL},
+     * {@code IO} or {@code OFF}, anything else read as {@code FULL}.
+     */
+    static TelemetryLevelResolver<String> telemetryLevel(
+            String flagKey, Function<EvaluationContext, FlagEvaluationDetails<String>> evaluate) {
+        return new TelemetryLevelResolver<>(flagKey, evaluate, TelemetryLevel::parse);
+    }
+
+    /**
+     * A resolver for the {@code otelEnabled} boolean flag: {@code false} is
+     * {@code OFF}, {@code true} (or no answer) is {@code FULL} - "not switched
+     * off", leaving the detail to {@code telemetryLevel}.
+     */
+    static TelemetryLevelResolver<Boolean> otelEnabled(
+            String flagKey, Function<EvaluationContext, FlagEvaluationDetails<Boolean>> evaluate) {
+        return new TelemetryLevelResolver<>(flagKey, evaluate,
+                enabled -> Boolean.FALSE.equals(enabled) ? TelemetryLevel.OFF : TelemetryLevel.FULL);
     }
 
     /**
@@ -87,47 +118,52 @@ final class TelemetryLevelResolver implements TelemetryLevelSource {
      * <p>Wired to the provider's READY / CONFIGURATION_CHANGED / ERROR / STALE
      * events rather than called from the span path.
      *
+     * <p>{@code synchronized} because the SDK dispatches event handlers on a
+     * thread pool: two events in quick succession could otherwise evaluate the
+     * old and the new ruleset concurrently and write in the wrong order,
+     * leaving a stale answer - say {@code OFF} - cached until the next event.
+     * The span path never takes this lock.
+     *
      * @param flagsChanged the keys the provider reported as changed, or
      *     {@code null}/empty when it didn't say (READY, ERROR, STALE)
      */
-    void classify(List<String> flagsChanged) {
+    synchronized void classify(List<String> flagsChanged) {
         // When the provider names the keys that moved and ours isn't among
         // them, nothing about our classification can have changed.
         if (flagsChanged != null && !flagsChanged.isEmpty() && !flagsChanged.contains(flagKey)) {
             return;
         }
 
-        FlagEvaluationDetails<String> details = evaluate.apply(null);
+        FlagEvaluationDetails<T> details = evaluate.apply(null);
 
         // Deliberately STATIC only. TARGETING_MATCH and DEFAULT both mean a
         // targeting block ran, so the answer belongs to one evaluation context
         // and not to the process; DISABLED and ERROR are not worth betting on.
-        Boolean decision = Reason.STATIC.name().equals(details.getReason())
-                ? Boolean.valueOf(suppresses(details.getValue()))
+        TelemetryLevel decision = Reason.STATIC.name().equals(details.getReason())
+                ? interpret.apply(details.getValue())
                 : null;
 
-        Boolean previous = cached.getAndSet(decision);
+        TelemetryLevel previous = cached.getAndSet(decision);
         if (!Objects.equals(previous, decision)) {
             if (decision == null) {
                 log.info("otelfeature-java-extension: " + flagKey + " resolves with reason="
                         + details.getReason() + " - evaluating per span");
             } else {
                 log.info("otelfeature-java-extension: " + flagKey + " is static (reason="
-                        + details.getReason() + ") - INTERNAL spans "
-                        + (decision ? "suppressed" : "visible")
+                        + details.getReason() + ") - level " + decision
                         + ", no further evaluation");
             }
         }
     }
 
     @Override
-    public boolean shouldSuppressInternal() {
-        Boolean decision = cached.get();
+    public TelemetryLevel level() {
+        TelemetryLevel decision = cached.get();
         if (decision != null) {
             // The point of the whole exercise: a volatile read, and done.
             return decision;
         }
-        return suppresses(evaluate.apply(evaluationContext()).getValue());
+        return interpret.apply(evaluate.apply(evaluationContext()).getValue());
     }
 
     /**
@@ -144,17 +180,12 @@ final class TelemetryLevelResolver implements TelemetryLevelSource {
         return null;
     }
 
-    /** Whether the resolved value means "suppress". */
-    private static boolean suppresses(String value) {
-        return SUPPRESS_VALUE.equalsIgnoreCase(value);
-    }
-
     /**
      * The kept answer, or {@code null} when every span is evaluated. For tests.
      *
      * @return the cached decision, or {@code null} if there isn't one
      */
-    Boolean cachedDecision() {
+    TelemetryLevel cachedDecision() {
         return cached.get();
     }
 }
