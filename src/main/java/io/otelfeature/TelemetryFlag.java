@@ -140,10 +140,17 @@ final class TelemetryFlag<T, R> {
         FlagEvaluationDetails<T> details = evaluate.apply(null);
         R meaning = interpret(details);
 
-        // Deliberately STATIC only. TARGETING_MATCH and DEFAULT both mean a
-        // targeting block ran, so the answer belongs to one evaluation context
-        // and not to the process; DISABLED and ERROR are not worth betting on.
-        R decision = Reason.STATIC.name().equals(details.getReason()) ? meaning : null;
+        // STATIC, and a flag that is simply not in the ruleset. TARGETING_MATCH
+        // and DEFAULT both mean a targeting block ran, so the answer belongs to
+        // one evaluation context and not to the process; DISABLED and other
+        // errors are not worth betting on. FLAG_NOT_FOUND is: the ruleset has
+        // no such flag, the answer is the fallback for every span, and adding
+        // the flag later fires a configuration change naming it, which
+        // re-classifies. Without this a ruleset that leaves out an optional
+        // flag (recordSpan, say) would pay for an evaluation on every span.
+        boolean cacheable = Reason.STATIC.name().equals(details.getReason())
+                || details.getErrorCode() == ErrorCode.FLAG_NOT_FOUND;
+        R decision = cacheable ? meaning : null;
 
         R previous = cached.getAndSet(decision);
         if (!Objects.equals(previous, decision)) {

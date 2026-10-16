@@ -33,6 +33,8 @@ import java.util.function.Function;
  *       {@code telemetryLevel=OFF}: drop every span.</li>
  *   <li>{@code suppressInternal} - {@code telemetryLevel=IO}: drop
  *       {@code INTERNAL} spans.</li>
+ *   <li>{@code record} - {@code recordSpan}, per span: {@code false} drops this
+ *       one span. It never re-enables what {@code enabled} turned off.</li>
  * </ul>
  *
  * <p>Further flags (sample ratio, disabled instrumentation scopes) add a field
@@ -40,17 +42,21 @@ import java.util.function.Function;
  *
  * @param enabled whether any span may be exported
  * @param suppressInternal whether {@code INTERNAL} spans are dropped
+ * @param record whether this span is recorded ({@code recordSpan})
  */
-public record TelemetryPolicy(boolean enabled, boolean suppressInternal) {
+public record TelemetryPolicy(boolean enabled, boolean suppressInternal, boolean record) {
 
     /** Trace everything: the stock agent's behaviour. */
-    public static final TelemetryPolicy FULL = new TelemetryPolicy(true, false);
+    public static final TelemetryPolicy FULL = new TelemetryPolicy(true, false, true);
 
     /** Drop {@code INTERNAL} spans, keep the edges. */
-    public static final TelemetryPolicy IO = new TelemetryPolicy(true, true);
+    public static final TelemetryPolicy IO = new TelemetryPolicy(true, true, true);
 
     /** Drop every span. */
-    public static final TelemetryPolicy DISABLED = new TelemetryPolicy(false, false);
+    public static final TelemetryPolicy DISABLED = new TelemetryPolicy(false, false, true);
+
+    /** Drop this span ({@code recordSpan=false}); tracing as such stays on. */
+    public static final TelemetryPolicy NOT_RECORDED = new TelemetryPolicy(true, false, false);
 
     /**
      * The policy for the given fields, without allocating: this is called on
@@ -61,8 +67,24 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal) {
      * @return a shared instance
      */
     static TelemetryPolicy of(boolean enabled, boolean suppressInternal) {
+        return of(enabled, suppressInternal, true);
+    }
+
+    /**
+     * The policy for the given fields, without allocating. Precedence:
+     * {@code enabled=false} wins over everything, then {@code record=false}.
+     *
+     * @param enabled whether any span may be exported
+     * @param suppressInternal whether {@code INTERNAL} spans are dropped
+     * @param record whether this span is recorded
+     * @return a shared instance
+     */
+    static TelemetryPolicy of(boolean enabled, boolean suppressInternal, boolean record) {
         if (!enabled) {
             return DISABLED;
+        }
+        if (!record) {
+            return NOT_RECORDED;
         }
         return suppressInternal ? IO : FULL;
     }
@@ -74,7 +96,7 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal) {
      * @return {@code true} if the span should be suppressed
      */
     public boolean suppresses(SpanKind kind) {
-        return !enabled || (suppressInternal && kind == SpanKind.INTERNAL);
+        return !enabled || !record || (suppressInternal && kind == SpanKind.INTERNAL);
     }
 
     /**
@@ -92,6 +114,8 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal) {
      *       in that case, which then installs nothing.</li>
      *   <li>{@code suppressInternal} - {@code false}: the stock agent has no
      *       setting for it.</li>
+     *   <li>{@code record} - {@code true}: the stock agent records every span
+     *       it samples.</li>
      * </ul>
      *
      * @return the startup defaults

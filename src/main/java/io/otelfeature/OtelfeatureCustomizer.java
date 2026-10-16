@@ -160,7 +160,9 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
                 }
                 return p;
             }
-            return TelemetryPolicy.of(true, !p.enabled() || p.suppressInternal());
+            // recordSpan stays: the sampler drops what it safely can, and the
+            // processor suppresses the rest (mid-trace spans that propagate).
+            return TelemetryPolicy.of(true, !p.enabled() || p.suppressInternal(), p.record());
         };
         return new TelemetryPolicySource() {
             @Override

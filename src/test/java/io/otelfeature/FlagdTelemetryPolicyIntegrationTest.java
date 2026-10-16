@@ -211,20 +211,25 @@ class FlagdTelemetryPolicyIntegrationTest {
     }
 
     @Test
-    @DisplayName("a missing flag is not cached, and suppresses nothing")
-    void missingFlagIsNotCached() throws IOException {
+    @DisplayName("a missing flag is cached as its fallback, and adding it later takes effect")
+    void missingFlagIsCachedAsFallback() throws IOException {
+        write(staticFlags("io"));
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO));
+
         write("""
                 { "$schema": "https://flagd.dev/schema/v0/flags.json", "flags": {} }
                 """);
 
-        assertTrue(waitFor(() -> {
-            // ERROR is not a cacheable reason: the flag may yet appear.
-            return telemetryLevel.cachedLevel() == null && telemetryLevel.cachedEnabled() == null
-                    && telemetryLevel.policy(null) == TelemetryPolicy.FULL;
-        }), "missing flags should resolve to their defaults and stay uncached");
+        // FLAG_NOT_FOUND is cached: the answer is the fallback for every span,
+        // with no per-span evaluation, until the ruleset changes again.
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL
+                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
+                "missing flags should be kept as their startup defaults");
+        assertEquals(TelemetryPolicy.FULL, telemetryLevel.policy(null));
 
-        assertNull(telemetryLevel.cachedLevel());
-        assertNull(telemetryLevel.cachedEnabled());
+        write(staticFlags("io"));
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO),
+                "adding the flag back must re-classify it");
     }
 
     @Test
@@ -264,6 +269,9 @@ class FlagdTelemetryPolicyIntegrationTest {
     @Test
     @DisplayName("a flag file without otelEnabled leaves tracing on")
     void missingOtelEnabledFailsOpen() throws IOException {
+        write(staticFlags("full", "off"));
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.DISABLED));
+
         write("""
                 {
                   "$schema": "https://flagd.dev/schema/v0/flags.json",
@@ -278,8 +286,8 @@ class FlagdTelemetryPolicyIntegrationTest {
                 """);
 
         assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO
-                        && telemetryLevel.cachedEnabled() == null),
-                "a missing otelEnabled should stay uncached");
+                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
+                "a removed otelEnabled should fall back to 'on', and be kept");
         assertEquals(TelemetryPolicy.IO, telemetryLevel.policy(null));
     }
 

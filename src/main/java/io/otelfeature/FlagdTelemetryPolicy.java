@@ -57,6 +57,8 @@ import java.util.logging.Logger;
  *       either says off. The boolean is the one to flip by hand; the {@code OFF}
  *       variant is there for whoever already manages {@code telemetryLevel}.</li>
  *   <li>{@code suppressInternal} is {@code telemetryLevel == IO}.</li>
+ *   <li>{@code record} is {@code recordSpan}, a per-span boolean, asked only
+ *       when the two above leave tracing on.</li>
  * </ul>
  *
  * <p>{@code OTEL_SDK_DISABLED=true} is a hard floor: the policy is then
@@ -78,6 +80,8 @@ import java.util.logging.Logger;
  *   <li>{@code OTELFEATURE_FLAG_NAME} - level flag key (default: {@code telemetryLevel})</li>
  *   <li>{@code OTELFEATURE_ENABLED_FLAG_NAME} - kill-switch flag key (default:
  *       {@code otelEnabled})</li>
+ *   <li>{@code OTELFEATURE_RECORD_SPAN_FLAG_NAME} - per-span flag key (default:
+ *       {@code recordSpan})</li>
  * </ul>
  */
 public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
@@ -90,6 +94,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     private final OpenFeatureAPI api;
     private final TelemetryFlag<String, TelemetryLevel> levelFlag;
     private final TelemetryFlag<Boolean, Boolean> enabledFlag;
+    private final TelemetryFlag<Boolean, Boolean> recordFlag;
     private final EvaluationContextFactory contexts = new EvaluationContextFactory();
 
     /**
@@ -101,6 +106,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     public FlagdTelemetryPolicy() {
         this(env("OTELFEATURE_FLAG_NAME", "telemetryLevel"),
                 env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled"),
+                env("OTELFEATURE_RECORD_SPAN_FLAG_NAME", "recordSpan"),
                 TelemetryPolicy.startupDefaults(),
                 inProcessOptions());
     }
@@ -117,6 +123,20 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
      */
     FlagdTelemetryPolicy(
             String levelFlagKey, String enabledFlagKey, TelemetryPolicy defaults, FlagdOptions options) {
+        this(levelFlagKey, enabledFlagKey, "recordSpan", defaults, options);
+    }
+
+    /**
+     * Visible for testing, with the {@code recordSpan} key as well.
+     *
+     * @param levelFlagKey the {@code telemetryLevel} flag to resolve
+     * @param enabledFlagKey the {@code otelEnabled} flag to resolve
+     * @param recordFlagKey the {@code recordSpan} flag to resolve
+     * @param defaults the per-field fallback
+     * @param options how to reach flagd
+     */
+    FlagdTelemetryPolicy(String levelFlagKey, String enabledFlagKey, String recordFlagKey,
+            TelemetryPolicy defaults, FlagdOptions options) {
         // createIsolated(), deliberately not getInstance(): this extension runs
         // inside somebody else's application, and that application may well use
         // OpenFeature itself. Registering our flagd provider on the global
@@ -136,6 +156,11 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
                 context -> client.getBooleanDetails(enabledFlagKey, defaults.enabled(), context),
                 enabled -> enabled,
                 defaults.enabled());
+        this.recordFlag = new TelemetryFlag<>(
+                recordFlagKey,
+                context -> client.getBooleanDetails(recordFlagKey, defaults.record(), context),
+                record -> record,
+                defaults.record());
 
         // Subscribe before registering the provider, so no event can land in
         // the gap. The SDK also replays the current state to a handler as it is
@@ -168,6 +193,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         List<String> flagsChanged = details == null ? null : details.getFlagsChanged();
         reclassify(enabledFlag, flagsChanged);
         reclassify(levelFlag, flagsChanged);
+        reclassify(recordFlag, flagsChanged);
     }
 
     private static void reclassify(TelemetryFlag<?, ?> flag, List<String> flagsChanged) {
@@ -195,8 +221,12 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
                 return TelemetryPolicy.DISABLED;
             }
             TelemetryLevel level = levelFlag.cachedDecision();
-            if (level != null) {
-                return of(level);
+            if (level == TelemetryLevel.OFF) {
+                return TelemetryPolicy.DISABLED;
+            }
+            Boolean record = recordFlag.cachedDecision();
+            if (level != null && record != null) {
+                return of(level, record);
             }
         }
         return null;
@@ -211,15 +241,31 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         // At least one flag must be evaluated: build the span's context once,
         // on first use, and share it between the two.
         LazyContext context = new LazyContext(contexts, span);
-        // The kill switch first: while it is off, telemetryLevel is not asked.
+        // Precedence: the kill switch, then telemetryLevel, then recordSpan.
+        // Whatever is decided by a higher one, the lower ones are not asked:
+        // recordSpan never re-enables what the global switches turned off.
         if (!enabledFlag.value(context)) {
             return TelemetryPolicy.DISABLED;
         }
-        return of(levelFlag.value(context));
+        TelemetryLevel level = levelFlag.value(context);
+        if (level == TelemetryLevel.OFF) {
+            return TelemetryPolicy.DISABLED;
+        }
+        return of(level, recordFlag.value(context));
     }
 
-    private static TelemetryPolicy of(TelemetryLevel level) {
-        return TelemetryPolicy.of(level != TelemetryLevel.OFF, level == TelemetryLevel.IO);
+    private static TelemetryPolicy of(TelemetryLevel level, boolean record) {
+        return TelemetryPolicy.of(level != TelemetryLevel.OFF, level == TelemetryLevel.IO, record);
+    }
+
+    /**
+     * Visible for testing: the kept {@code recordSpan} answer, or {@code null}
+     * when every span evaluates it.
+     *
+     * @return the cached decision, or {@code null} if there isn't one
+     */
+    Boolean cachedRecord() {
+        return recordFlag.cachedDecision();
     }
 
     /**

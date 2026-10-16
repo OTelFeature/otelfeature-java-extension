@@ -47,6 +47,40 @@ span. Only traces are affected: metrics and logs carry on regardless.
 `OTEL_SDK_DISABLED` turned off. The extension then installs nothing at all (not
 even a flagd connection), and the agent's disabled SDK exports nothing.
 
+### Dropping single spans: `recordSpan`
+
+`otelEnabled` and `telemetryLevel` are global switches. To drop *some* spans,
+such as health checks or database calls, there is a third flag: `recordSpan`,
+a boolean (default `true`) evaluated **per span** against the
+[evaluation context](#the-evaluation-context-just-your-opentelemetry-attributes).
+A span it answers `false` for is not exported.
+
+```json
+"recordSpan": {
+  "state": "ENABLED",
+  "defaultVariant": "on",
+  "variants": { "on": true, "off": false },
+  "targeting": { "if": [ { "and": [
+      { "==": [ { "var": "service.name" }, "geocode" ] },
+      { "==": [ { "var": "url.path" }, "/health" ] } ] }, "off", null ] }
+}
+```
+
+**Precedence:** `OTEL_SDK_DISABLED` (hard floor) > `otelEnabled=false` /
+`telemetryLevel=OFF` > `recordSpan`. `recordSpan=true` never re-enables what a
+global switch turned off, and while one has, `recordSpan` isn't even evaluated.
+
+| | `processor` mode | `sampler` mode |
+|---|---|---|
+| a root span (health check, incoming request) | suppressed at `onEnd`; children re-parented | `DROP`: never created, the whole trace goes |
+| a database client leaf (`CLIENT` with `db.system.name`) | suppressed at `onEnd` | `DROP`: never created |
+| any other span that propagates (an HTTP client call mid-trace) | suppressed at `onEnd`; children re-parented | suppressed by the processor, **not** dropped, so downstream services don't inherit `sampled=0` |
+| a rule on `otel.scope.*` (e.g. the JDBC instrumentation) | applies | applies, but at the processor: a sampler is not told the scope |
+
+A static `recordSpan`, or none at all, costs nothing per span: the answer is
+cached until the ruleset changes. A missing flag or a provider error records
+(fail open).
+
 > [!IMPORTANT]
 > **`OFF` is suppression, not an SDK disable.** Where it is enforced depends on
 > [`OTELFEATURE_ENFORCEMENT`](#enforcement-processor-or-sampler):
@@ -200,10 +234,11 @@ evaluation context**, purely to read the reason back:
   evaluates for itself.
 
 Each flag is classified on its own, so a targeted `telemetryLevel` next to a
-static `otelEnabled` costs one cached read plus one evaluation per span. One
-consequence: a flag that is missing resolves with `ERROR` and is therefore
-evaluated per span — define `otelEnabled` in the ruleset (as `true`) rather
-than leaving it out, or every span pays for the lookup.
+static `otelEnabled` costs one cached read plus one evaluation per span. A flag
+that is simply missing from the ruleset (`FLAG_NOT_FOUND`) is cached too, as its
+startup default: adding it later fires a configuration change naming it, which
+re-classifies. Other errors (provider not ready, wrong type, ...) are not
+cached and are evaluated per span until they resolve.
 
 That classification is redone on every `PROVIDER_CONFIGURATION_CHANGED`, so
 attaching a `targeting` block to `telemetryLevel` in flagd makes the next probe
@@ -312,6 +347,7 @@ java -javaagent:opentelemetry-javaagent.jar -jar your-app.jar
 | `FLAGD_PORT`                          | `8015`           | flagd gRPC **sync** port (in-process resolver)  |
 | `OTELFEATURE_FLAG_NAME`               | `telemetryLevel` | flagd key of the level flag (`FULL`/`IO`/`OFF`) |
 | `OTELFEATURE_ENABLED_FLAG_NAME`       | `otelEnabled`    | flagd key of the boolean kill switch            |
+| `OTELFEATURE_RECORD_SPAN_FLAG_NAME`   | `recordSpan`     | flagd key of the per-span boolean               |
 | `OTELFEATURE_ENFORCEMENT`             | `processor`      | `processor` or `sampler`, see [Enforcement](#enforcement-processor-or-sampler) |
 
 > [!IMPORTANT]

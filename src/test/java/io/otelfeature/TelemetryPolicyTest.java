@@ -82,4 +82,22 @@ class TelemetryPolicyTest {
         assertEquals(TelemetryLevel.IO, TelemetryLevel.of(TelemetryPolicy.IO));
         assertEquals(TelemetryLevel.OFF, TelemetryLevel.of(TelemetryPolicy.DISABLED));
     }
+
+    @ParameterizedTest
+    @EnumSource(SpanKind.class)
+    @DisplayName("record=false drops this span, whatever its kind")
+    void notRecordedDropsEveryKind(SpanKind kind) {
+        assertTrue(TelemetryPolicy.NOT_RECORDED.suppresses(kind));
+    }
+
+    @Test
+    @DisplayName("precedence: disabled beats record=false, record=false beats IO")
+    void recordPrecedence() {
+        assertSame(TelemetryPolicy.DISABLED, TelemetryPolicy.of(false, false, true));
+        assertSame(TelemetryPolicy.DISABLED, TelemetryPolicy.of(false, true, false));
+        assertSame(TelemetryPolicy.NOT_RECORDED, TelemetryPolicy.of(true, true, false));
+        assertSame(TelemetryPolicy.NOT_RECORDED, TelemetryPolicy.of(true, false, false));
+        assertSame(TelemetryPolicy.IO, TelemetryPolicy.of(true, true, true));
+        assertTrue(TelemetryPolicy.startupDefaults(name -> null).record(), "the stock agent records");
+    }
 }

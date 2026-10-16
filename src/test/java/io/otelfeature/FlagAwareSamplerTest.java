@@ -470,4 +470,16 @@ class FlagAwareSamplerTest {
                 Attributes.empty(), List.of()).getDecision());
         assertTrue(capturing.seen.isEmpty());
     }
+
+    @Test
+    @DisplayName("only a CLIENT span with a DB system counts as a non-propagating leaf")
+    void databaseLeaf() {
+        Attributes db = Attributes.of(AttributeKey.stringKey("db.system.name"), "postgresql");
+        Attributes oldDb = Attributes.of(AttributeKey.stringKey("db.system"), "postgresql");
+        assertTrue(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT, db));
+        assertTrue(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT, oldDb));
+        assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.INTERNAL, db));
+        assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT, Attributes.empty()));
+        assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT, null));
+    }
 }

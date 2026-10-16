@@ -16,6 +16,7 @@
 
 package io.otelfeature;
 
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
@@ -48,6 +49,13 @@ import java.util.logging.Logger;
  *       sampled local parent is left to the delegate, so a trace that
  *       was already sampled when the flag flipped finishes coherently instead
  *       of losing its tail.</li>
+ *   <li>{@code recordSpan=false} for this span: {@code DROP} it if it is a local
+ *       root or a database client leaf ({@code CLIENT} with
+ *       {@code db.system.name}); any other span is left to
+ *       {@link FilteringSpanProcessor}, so a mid-trace span that propagates
+ *       never sends {@code sampled=0} downstream. Rules on
+ *       {@code otel.scope.*} never match here (a sampler is not told the
+ *       scope) and are enforced by the processor instead.</li>
  *   <li>Everything else, including {@code telemetryLevel=IO}: delegate.
  *       {@code INTERNAL} spans are usually mid-trace, and dropping one here
  *       would take its children with it; that suppression stays in
@@ -86,20 +94,48 @@ final class FlagAwareSampler implements Sampler {
         // enabled again, children are the delegate's call as usual - a
         // non-parent-based delegate may then sample the rest of a trace whose
         // root was dropped.
-        if ((localRoot || !parent.isSampled())
-                && !enabled(traceId, name, spanKind, attributes)) {
-            return SamplingResult.drop();
+        boolean askEnabled = localRoot || !parent.isSampled();
+        // recordSpan=false may only DROP where losing the subtree is the
+        // intended outcome: a local root (the whole trace goes) or a leaf that
+        // propagates nothing (a DB client call). Anything else that propagates
+        // mid-trace is left to the processor, which suppresses it and
+        // re-parents its children, so downstream services don't inherit
+        // sampled=0.
+        boolean askRecord = localRoot || isDatabaseLeaf(spanKind, attributes);
+        if (askEnabled || askRecord) {
+            TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes);
+            if (decision != null) {
+                if (askEnabled && !decision.enabled()) {
+                    return SamplingResult.drop();
+                }
+                if (askRecord && decision.enabled() && !decision.record()) {
+                    return SamplingResult.drop();
+                }
+            }
         }
         return delegate.shouldSample(parentContext, traceId, name, spanKind, attributes, parentLinks);
     }
 
-    private boolean enabled(String traceId, String name, SpanKind kind, Attributes attributes) {
+    /**
+     * A database client call: a leaf that propagates no context, so dropping
+     * it drops nothing else.
+     */
+    static boolean isDatabaseLeaf(SpanKind kind, Attributes attributes) {
+        return kind == SpanKind.CLIENT && attributes != null
+                && (attributes.get(DB_SYSTEM_NAME) != null || attributes.get(DB_SYSTEM) != null);
+    }
+
+    private static final AttributeKey<String> DB_SYSTEM_NAME = AttributeKey.stringKey("db.system.name");
+    private static final AttributeKey<String> DB_SYSTEM = AttributeKey.stringKey("db.system");
+
+    /** The policy for this span, or {@code null} to delegate (fail open). */
+    private TelemetryPolicy policyFor(String traceId, String name, SpanKind kind, Attributes attributes) {
         try {
             TelemetryPolicy cached = policy.cachedPolicy();
             if (cached != null) {
-                return cached.enabled();
+                return cached;
             }
-            return policy.policy(new SpanStart(traceId, name, kind, attributes, null)).enabled();
+            return policy.policy(new SpanStart(traceId, name, kind, attributes, null));
         } catch (Throwable t) {
             // The source is not supposed to throw; if it does anyway, tracing
             // stays as the delegate would have it. Warn once, not per span.
@@ -107,7 +143,7 @@ final class FlagAwareSampler implements Sampler {
             log.log(first ? Level.WARNING : Level.FINE,
                     "otelfeature-java-extension: policy unavailable, delegating"
                             + (first ? " (further occurrences are logged at FINE)" : ""), t);
-            return true;
+            return null;
         }
     }
 
