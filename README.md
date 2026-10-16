@@ -420,8 +420,9 @@ outside script and no new metric:
 - **Not with `OTEL_METRICS_EXPORTER=none`.** With no reader the agent's meters
   are no-ops. Registering this one would switch the whole metrics SDK on, and
   every instrument would aggregate for nobody. So in that case the reader isn't
-  registered, the key never appears, and a rule on it falls back to its
-  default. The same goes when HTTP server instrumentation is off
+  registered and **there is no error rate**:
+  `otelfeature.http.server.error_rate` never appears in the context, and
+  error-rate rules don't match (their flag serves its default variant). The same goes when HTTP server instrumentation is off
   (`otel.instrumentation.common.default-enabled=false`, or the server module
   disabled): there is no histogram to read.
 - **On failure** (a collection that throws), the last rate is withdrawn rather
