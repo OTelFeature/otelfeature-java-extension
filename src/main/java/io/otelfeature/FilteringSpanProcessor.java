@@ -25,10 +25,10 @@ import io.opentelemetry.sdk.trace.SpanProcessor;
 
 /**
  * Wraps a delegate {@link SpanProcessor} and drops the spans the current
- * {@link TelemetryLevel} does not allow: {@code INTERNAL} spans at {@code IO}
- * (flagd {@code telemetryLevel} set to {@code "IO"}), every span at {@code OFF}
- * ({@code telemetryLevel} set to {@code "OFF"}, or {@code otelEnabled} set to
- * {@code false}).
+ * {@link TelemetryPolicy} does not allow: {@code INTERNAL} spans under
+ * {@code suppressInternal} (flagd {@code telemetryLevel} set to {@code "IO"}),
+ * every span when not {@code enabled} ({@code telemetryLevel} set to
+ * {@code "OFF"}, or {@code otelEnabled} set to {@code false}).
  *
  * <p>Filtering at the {@link SpanProcessor} level means dropped spans never enter
  * the {@code BatchSpanProcessor} queue, saving memory and CPU compared to
@@ -54,20 +54,20 @@ import io.opentelemetry.sdk.trace.SpanProcessor;
  * OTelFeature/otelfeature-java-extension#21.
  *
  * <p>When suppression is inactive, all spans are passed through unchanged with
- * minimal overhead: for static flags that is two volatile reads and an enum
- * switch per span, with no flag evaluation at all - see
- * {@link TelemetryLevelResolver}.
+ * minimal overhead: for static flags that is two volatile reads and a boolean
+ * check per span, with no flag evaluation at all - see
+ * {@link TelemetryFlag}.
  */
 public class FilteringSpanProcessor implements SpanProcessor {
 
     private final SpanProcessor delegate;
-    private final TelemetryLevelSource telemetryLevel;
+    private final TelemetryPolicySource policy;
     private final SuppressedSpanRegistry registry;
 
-    public FilteringSpanProcessor(SpanProcessor delegate, TelemetryLevelSource telemetryLevel,
+    public FilteringSpanProcessor(SpanProcessor delegate, TelemetryPolicySource policy,
                                   SuppressedSpanRegistry registry) {
         this.delegate = delegate;
-        this.telemetryLevel = telemetryLevel;
+        this.policy = policy;
         this.registry = registry;
     }
 
@@ -81,14 +81,42 @@ public class FilteringSpanProcessor implements SpanProcessor {
         //
         // This is also where the decision is taken for the span's whole
         // lifetime: onEnd reads the registry instead of the flag.
-        if (telemetryLevel.level().suppresses(span.getKind())) {
-            SpanContext parent = span.getParentSpanContext();
-            // A suppressed root span is recorded against an invalid parent, so
-            // onEnd can still find it and its children are promoted to roots
-            // rather than pointing at a span that was never exported.
-            registry.record(
-                    span.getSpanContext().getSpanId(),
-                    parent != null && parent.isValid() ? parent : SpanContext.getInvalid());
+        SpanContext parent = span.getParentSpanContext();
+        boolean localParent = parent != null && parent.isValid() && !parent.isRemote();
+        // A span inside a request recordSpan dropped as a whole goes with it,
+        // without asking any flag: the request was decided at its root.
+        if (localParent && registry.suppressesSubtree(parent.getSpanId())) {
+            registry.record(span.getSpanContext().getSpanId(), parent, true);
+            delegate.onStart(parentContext, span);
+            return;
+        }
+
+        // Static flags answer without the span: getAttributes() copies the
+        // span's attributes under its lock, so it is only read when a flag
+        // actually has to be evaluated.
+        // SPAN: the processor never uses the sample ratio, so a targeted
+        // traceSampleRatio is not evaluated here.
+        TelemetryPolicy decision = policy.cachedPolicy(TelemetryPolicy.Need.SPAN);
+        if (decision == null) {
+            decision = policy.policy(new SpanStart(
+                    span.getSpanContext().getTraceId(),
+                    span.getName(),
+                    span.getKind(),
+                    span.getAttributes(),
+                    span.getInstrumentationScopeInfo()), TelemetryPolicy.Need.SPAN);
+        }
+        if (decision.suppresses(span.getKind())) {
+            SpanContext recordedParent = parent != null && parent.isValid() ? parent : SpanContext.getInvalid();
+            // recordSpan=false on a root (no parent, or an entry span with a
+            // remote one) drops the whole request in this service, as the
+            // sampler would: its local subtree is suppressed with it. Anything
+            // else - IO, OFF, recordSpan mid-trace - suppresses just this span,
+            // and its children are re-parented. A suppressed root is recorded
+            // against an invalid parent, so its surviving children are
+            // promoted to roots rather than pointing at a span nobody exported.
+            boolean subtree = !decision.record()
+                    && FlagAwareSampler.isRecordSpanRoot(recordedParent, span.getKind());
+            registry.record(span.getSpanContext().getSpanId(), recordedParent, subtree);
         }
         delegate.onStart(parentContext, span);
     }

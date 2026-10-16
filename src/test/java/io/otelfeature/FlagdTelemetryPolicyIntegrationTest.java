@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,7 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Drives {@link FlagdTelemetryLevel} against a <em>real</em> flagd provider in
+ * Drives {@link FlagdTelemetryPolicy} against a <em>real</em> flagd provider in
  * {@code FILE} resolver mode.
  *
  * <p>{@code FILE} shares the flag parser, the targeting engine and the
@@ -46,8 +47,8 @@ import org.junit.jupiter.api.io.TempDir;
  * ruleset moves?" is observed rather than assumed, without needing a flagd
  * container.
  */
-@DisplayName("FlagdTelemetryLevel against a real flagd provider")
-class FlagdTelemetryLevelIntegrationTest {
+@DisplayName("FlagdTelemetryPolicy against a real flagd provider")
+class FlagdTelemetryPolicyIntegrationTest {
 
     private static final String FLAG_KEY = "telemetryLevel";
     private static final String ENABLED_KEY = "otelEnabled";
@@ -122,16 +123,21 @@ class FlagdTelemetryLevelIntegrationTest {
     Path tempDir;
 
     private Path flagFile;
-    private FlagdTelemetryLevel telemetryLevel;
+    private FlagdTelemetryPolicy telemetryLevel;
 
     @BeforeEach
     void setUp() throws IOException {
         flagFile = tempDir.resolve("flags.json");
         write(staticFlags("full"));
 
-        telemetryLevel = new FlagdTelemetryLevel(
+        telemetryLevel = policyWithDefaults(TelemetryPolicy.FULL);
+    }
+
+    private FlagdTelemetryPolicy policyWithDefaults(TelemetryPolicy defaults) {
+        return new FlagdTelemetryPolicy(
                 FLAG_KEY,
                 ENABLED_KEY,
+                defaults,
                 FlagdOptions.builder()
                         .resolverType(Config.Resolver.FILE)
                         .offlineFlagSourcePath(flagFile.toString())
@@ -155,7 +161,7 @@ class FlagdTelemetryLevelIntegrationTest {
                 "provider never classified the flag");
 
         assertEquals(TelemetryLevel.FULL, telemetryLevel.cachedLevel());
-        assertEquals(TelemetryLevel.FULL, telemetryLevel.level());
+        assertEquals(TelemetryPolicy.FULL, telemetryLevel.policy(null));
     }
 
     @Test
@@ -165,7 +171,7 @@ class FlagdTelemetryLevelIntegrationTest {
 
         write(staticFlags("io"));
 
-        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.IO),
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.IO),
                 "flag edit never reached the extension");
         assertEquals(TelemetryLevel.IO, telemetryLevel.cachedLevel(),
                 "an untargeted flag should still be answered from the kept decision");
@@ -189,7 +195,7 @@ class FlagdTelemetryLevelIntegrationTest {
 
             @Override
             public boolean getAsBoolean() {
-                if (telemetryLevel.level() == TelemetryLevel.IO) {
+                if (telemetryLevel.policy(null) == TelemetryPolicy.IO) {
                     sawSuppressed = true;
                 } else {
                     sawVisible = true;
@@ -205,20 +211,26 @@ class FlagdTelemetryLevelIntegrationTest {
     }
 
     @Test
-    @DisplayName("a missing flag is not cached, and suppresses nothing")
-    void missingFlagIsNotCached() throws IOException {
+    @DisplayName("a missing flag is cached as its fallback, and adding it later takes effect")
+    void missingFlagIsCachedAsFallback() throws IOException {
+        write(staticFlags("io"));
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO));
+
         write("""
                 { "$schema": "https://flagd.dev/schema/v0/flags.json", "flags": {} }
                 """);
 
-        assertTrue(waitFor(() -> {
-            // ERROR is not a cacheable reason: the flag may yet appear.
-            return telemetryLevel.cachedLevel() == null && telemetryLevel.cachedEnabled() == null
-                    && telemetryLevel.level() == TelemetryLevel.FULL;
-        }), "missing flags should resolve to their defaults and stay uncached");
+        // FLAG_NOT_FOUND is cached: the answer is the fallback for every span,
+        // with no per-span evaluation, until the ruleset changes again.
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL
+                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())
+                        && telemetryLevel.cachedPolicy() == TelemetryPolicy.FULL),
+                "missing flags should be kept as their startup defaults");
+        assertEquals(TelemetryPolicy.FULL, telemetryLevel.policy(null));
 
-        assertNull(telemetryLevel.cachedLevel());
-        assertNull(telemetryLevel.cachedEnabled());
+        write(staticFlags("io"));
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO),
+                "adding the flag back must re-classify it");
     }
 
     @Test
@@ -227,37 +239,40 @@ class FlagdTelemetryLevelIntegrationTest {
         assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL));
 
         write(staticFlags("off"));
-        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.OFF),
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.DISABLED),
                 "OFF never reached the extension");
         assertEquals(TelemetryLevel.OFF, telemetryLevel.cachedLevel());
 
         write(staticFlags("full"));
-        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.FULL),
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.FULL),
                 "switching back to FULL never reached the extension");
     }
 
     @Test
     @DisplayName("otelEnabled=false is OFF whatever telemetryLevel says, and flips back")
     void otelEnabledFalseIsOff() throws IOException {
-        assertTrue(waitFor(() -> telemetryLevel.cachedEnabled() == TelemetryLevel.FULL),
+        assertTrue(waitFor(() -> Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
                 "provider never classified otelEnabled");
 
         write(staticFlags("full", "off"));
-        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.OFF),
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.DISABLED),
                 "otelEnabled=false never reached the extension");
-        assertEquals(TelemetryLevel.OFF, telemetryLevel.cachedEnabled(),
+        assertEquals(Boolean.FALSE, telemetryLevel.cachedEnabled(),
                 "an untargeted otelEnabled should be answered from the kept decision");
         assertEquals(TelemetryLevel.FULL, telemetryLevel.cachedLevel(),
                 "telemetryLevel itself is untouched");
 
         write(staticFlags("io", "on"));
-        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.IO),
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.IO),
                 "with the kill switch back on, telemetryLevel decides again");
     }
 
     @Test
     @DisplayName("a flag file without otelEnabled leaves tracing on")
     void missingOtelEnabledFailsOpen() throws IOException {
+        write(staticFlags("full", "off"));
+        assertTrue(waitFor(() -> telemetryLevel.policy(null) == TelemetryPolicy.DISABLED));
+
         write("""
                 {
                   "$schema": "https://flagd.dev/schema/v0/flags.json",
@@ -272,13 +287,53 @@ class FlagdTelemetryLevelIntegrationTest {
                 """);
 
         assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO
-                        && telemetryLevel.cachedEnabled() == null),
-                "a missing otelEnabled should stay uncached");
-        assertEquals(TelemetryLevel.IO, telemetryLevel.level());
+                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())
+                        && telemetryLevel.cachedPolicy() == TelemetryPolicy.IO),
+                "a removed otelEnabled should fall back to 'on', and be kept");
+        assertEquals(TelemetryPolicy.IO, telemetryLevel.policy(null));
     }
+
+    @Test
+    @DisplayName("a disabled SDK is a hard floor: flags saying on don't re-enable tracing")
+    void fieldsFallBackToStartupDefaults() throws IOException {
+        telemetryLevel.shutdown();
+        // otelEnabled=true, telemetryLevel missing, startup defaults "disabled".
+        write("""
+                {
+                  "$schema": "https://flagd.dev/schema/v0/flags.json",
+                  "flags": {
+                    "otelEnabled": {
+                      "state": "ENABLED",
+                      "defaultVariant": "on",
+                      "variants": { "on": true, "off": false }
+                    }
+                  }
+                }
+                """);
+        telemetryLevel = policyWithDefaults(TelemetryPolicy.DISABLED);
+
+        assertTrue(waitFor(() -> Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
+                "provider never classified otelEnabled");
+        assertEquals(TelemetryPolicy.DISABLED, telemetryLevel.policy(null),
+                "the missing telemetryLevel keeps its share of the 'disabled' floor");
+
+        write(staticFlags("full", "on"));
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL),
+                "the new ruleset never reached the extension");
+        assertEquals(TelemetryPolicy.DISABLED, telemetryLevel.policy(null),
+                "OTEL_SDK_DISABLED is a hard floor: flags never enable what it turned off");
+    }
+
+    private long lastModified;
 
     private void write(String json) throws IOException {
         Files.writeString(flagFile, json, StandardCharsets.UTF_8);
+        // flagd's FILE source notices a change by modification time. Two writes
+        // in the same instant (setUp, then a test straight away) would look
+        // like one, and the second ruleset would never load: make every write
+        // visibly newer than the last.
+        lastModified = Math.max(System.currentTimeMillis(), lastModified + 1000);
+        Files.setLastModifiedTime(flagFile, FileTime.fromMillis(lastModified));
     }
 
     private static boolean waitFor(BooleanSupplier condition) {

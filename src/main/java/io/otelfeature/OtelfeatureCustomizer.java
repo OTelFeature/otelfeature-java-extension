@@ -18,6 +18,10 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
+import java.util.logging.Logger;
 
 /**
  * SPI entry point for the otelfeature-java-extension.
@@ -30,13 +34,19 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  *       drops spans before they enter the batch queue when suppression is
  *       active ({@code INTERNAL} at {@code IO}, all of them at {@code OFF}).
  *       Records dropped span IDs in a shared registry.
- *       It asks {@link FlagdTelemetryLevel}, which syncs the flag ruleset
+ *       It asks {@link FlagdTelemetryPolicy}, which syncs the flag ruleset
  *       in-process from flagd and evaluates it only as often as the flag
- *       actually requires - see {@link TelemetryLevelResolver}.</li>
+ *       actually requires - see {@link TelemetryFlag}.</li>
  *   <li><b>ReparentingSpanExporter</b> (via {@code addSpanExporterCustomizer}):
  *       re-parents surviving spans whose parents were suppressed, using the
  *       shared registry to resolve the nearest non-suppressed ancestor.</li>
  * </ol>
+ *
+ * <p>A third one wraps the agent's sampler: <b>FlagAwareSampler</b> (via
+ * {@code addSamplerCustomizer}). It applies {@code traceSampleRatio} to new
+ * traces in both modes, and with {@code OTELFEATURE_ENFORCEMENT=sampler} also
+ * drops local roots while tracing is disabled, before the span exists. See
+ * {@link Enforcement}.
  *
  * <p>This two-layer approach gives both performance (dropped spans never
  * batched) and correctness (children re-parented, trace hierarchy preserved).
@@ -55,20 +65,248 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  */
 public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvider {
 
+    private static final Logger log = Logger.getLogger(OtelfeatureCustomizer.class.getName());
+
+    /**
+     * Run after every other customizer provider, so the resource captured for
+     * the evaluation context is the final one - a distro or extension that
+     * adds {@code service.namespace} after us would otherwise be invisible to
+     * targeting rules. (A provider that also claims {@code Integer.MAX_VALUE}
+     * may still run after us.)
+     */
+    @Override
+    public int order() {
+        return Integer.MAX_VALUE;
+    }
+
     @Override
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
-        FlagdTelemetryLevel telemetryLevel = new FlagdTelemetryLevel();
-        SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
-
-        autoConfiguration.addSpanProcessorCustomizer(
-                (processor, config) -> new FilteringSpanProcessor(processor, telemetryLevel, registry));
-
-        autoConfiguration.addSpanExporterCustomizer(
-                (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
+        // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
+        // never enable what the environment turned off. Autoconfigure still
+        // calls customizers when the SDK is disabled (it then builds a no-op
+        // SDK and ignores them), so don't even open a connection to flagd.
+        if (!TelemetryPolicy.startupDefaults().enabled()) {
+            log.info("otelfeature-java-extension: OTEL_SDK_DISABLED is set - not installing;"
+                    + " flags never enable what OTEL_SDK_DISABLED turned off");
+            return;
+        }
+        FlagdTelemetryPolicy policy = new FlagdTelemetryPolicy();
+        ErrorRateReader errorRate = new ErrorRateReader(policy::setErrorRate,
+                envDuration("OTELFEATURE_ERROR_RATE_INTERVAL", Duration.ofSeconds(10)),
+                envLong("OTELFEATURE_ERROR_RATE_MIN_REQUESTS", 10));
+        install(autoConfiguration, policy, errorRate, Enforcement.fromEnvironment());
 
         // The provider holds a gRPC channel to flagd; close it on the way out
         // rather than leaving the sync stream to be torn down by the JVM.
-        Runtime.getRuntime().addShutdownHook(new Thread(telemetryLevel::shutdown,
+        Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
                 "otelfeature-shutdown"));
+    }
+
+    /**
+     * The wiring itself, with its parts passed in. Visible for testing.
+     *
+     * @param autoConfiguration the agent's autoconfigure hooks
+     * @param policy where the flags come from
+     * @param errorRate the reader that feeds {@code otelfeature.http.server.error_rate}
+     * @param mode where {@code enabled=false} is enforced
+     */
+    static void install(AutoConfigurationCustomizer autoConfiguration, FlagdTelemetryPolicy policy,
+            ErrorRateReader errorRate, Enforcement mode) {
+        SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
+        Logger.getLogger(OtelfeatureCustomizer.class.getName()).info(
+                "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
+                        + " (" + Enforcement.ENV + ")");
+
+        // The service's HTTP error rate, from its own request-duration metric,
+        // for rules like "error_rate > 0.05 -> traceSampleRatio 1.0". Not with
+        // OTEL_METRICS_EXPORTER=none: without a reader the agent's meters are
+        // no-ops, and ours would switch the whole metrics SDK on for nobody.
+        autoConfiguration.addMeterProviderCustomizer((meterProvider, config) -> {
+            if (metricsExportDisabled(config.getString("otel.metrics.exporter", "otlp"))) {
+                log.info("otelfeature-java-extension: OTEL_METRICS_EXPORTER=none - "
+                        + ErrorRateReader.ERROR_RATE_KEY_DOC + " is not computed");
+                return meterProvider;
+            }
+            return meterProvider.registerMetricReader(errorRate);
+        });
+
+        // The resource is the process-wide part of every evaluation context.
+        autoConfiguration.addResourceCustomizer((resource, config) -> {
+            policy.setResource(resource);
+            return resource;
+        });
+
+        // Installed in both modes: traceSampleRatio can only be applied by a
+        // sampler. In processor mode it applies the ratio and nothing else.
+        AtomicBoolean samplerInstalled = new AtomicBoolean();
+        autoConfiguration.addSamplerCustomizer((sampler, config) -> {
+            samplerInstalled.set(true);
+            // OTEL_TRACES_SAMPLER=always_off is a hard floor, like
+            // OTEL_SDK_DISABLED: no flag may sample what it turned off.
+            boolean alwaysOff = "always_off".equalsIgnoreCase(config.getString("otel.traces.sampler", ""));
+            return new FlagAwareSampler(sampler, policy, mode == Enforcement.SAMPLER, alwaysOff);
+        });
+
+        TelemetryPolicySource processorPolicy = processorPolicy(policy, mode, samplerInstalled::get);
+        autoConfiguration.addSpanProcessorCustomizer(
+                (processor, config) -> new FilteringSpanProcessor(processor, processorPolicy, registry));
+
+        autoConfiguration.addSpanExporterCustomizer(
+                (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
+    }
+
+    /** Whether {@code otel.metrics.exporter} lists only {@code none}. */
+    static boolean metricsExportDisabled(String exporters) {
+        if (exporters == null || exporters.isBlank()) {
+            return false;
+        }
+        for (String exporter : exporters.split(",")) {
+            if (!"none".equalsIgnoreCase(exporter.trim())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * A duration from the environment: {@code 500ms}, {@code 10s}, {@code 1m},
+     * or a plain number of seconds.
+     */
+    static Duration envDuration(String name, Duration fallback) {
+        return parseDuration(System.getenv(name), fallback, name);
+    }
+
+    static Duration parseDuration(String value, Duration fallback, String name) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        String v = value.trim().toLowerCase(java.util.Locale.ROOT);
+        try {
+            Duration parsed;
+            if (v.endsWith("ms")) {
+                parsed = Duration.ofMillis(Long.parseLong(v.substring(0, v.length() - 2).trim()));
+            } else if (v.endsWith("s")) {
+                parsed = Duration.ofSeconds(Long.parseLong(v.substring(0, v.length() - 1).trim()));
+            } else if (v.endsWith("m")) {
+                parsed = Duration.ofMinutes(Long.parseLong(v.substring(0, v.length() - 1).trim()));
+            } else {
+                parsed = Duration.ofSeconds(Long.parseLong(v));
+            }
+            if (parsed.isNegative() || parsed.isZero()) {
+                throw new NumberFormatException("not positive");
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a duration, using "
+                    + fallback.toMillis() + "ms");
+            return fallback;
+        }
+    }
+
+    static long envLong(String name, long fallback) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            long parsed = Long.parseLong(value.trim());
+            if (parsed < 0) {
+                log.warning("otelfeature-java-extension: " + name + "='" + value + "' is negative, using "
+                        + fallback);
+                return fallback;
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a number, using "
+                    + fallback);
+            return fallback;
+        }
+    }
+
+    /**
+     * What {@link FilteringSpanProcessor} enforces in each mode.
+     *
+     * <p>In sampler mode {@code enabled} belongs to {@link FlagAwareSampler}
+     * alone: it drops local roots, and a trace that was already sampled when
+     * the flag flipped is left to finish whole rather than lose its tail at
+     * the processor. The processor keeps {@code suppressInternal} in both modes
+     * - and while disabled it keeps suppressing {@code INTERNAL} spans of those
+     * in-flight traces, so turning telemetry off never exports more than
+     * {@code IO} would.
+     *
+     * <p>If sampler mode was asked for but the sampler customizer never ran
+     * (a host that sets its own sampler after autoconfiguration, say), the
+     * processor keeps enforcing {@code enabled} itself, so {@code OFF} still
+     * works, and says so once.
+     *
+     * <p>A policy read that throws fails open to {@link TelemetryPolicy#FULL}
+     * rather than throwing into the instrumented application's thread.
+     *
+     * @param policy the full policy
+     * @param mode where {@code enabled} is enforced
+     * @param samplerInstalled whether {@link FlagAwareSampler} was actually built
+     * @return the policy the processor should apply
+     */
+    static TelemetryPolicySource processorPolicy(
+            TelemetryPolicySource policy, Enforcement mode, BooleanSupplier samplerInstalled) {
+        AtomicBoolean warned = new AtomicBoolean();
+        java.util.function.UnaryOperator<TelemetryPolicy> view = p -> {
+            if (p == null || mode == Enforcement.PROCESSOR) {
+                return p;
+            }
+            if (!samplerInstalled.getAsBoolean()) {
+                if (warned.compareAndSet(false, true)) {
+                    Logger.getLogger(OtelfeatureCustomizer.class.getName()).warning(
+                            "otelfeature-java-extension: " + Enforcement.ENV + "=sampler, but the agent"
+                                    + " never applied the sampler customizer - enforcing at the processor");
+                }
+                return p;
+            }
+            // recordSpan stays: the sampler drops what it safely can, and the
+            // processor suppresses the rest (mid-trace spans that propagate).
+            return TelemetryPolicy.of(true, !p.enabled() || p.suppressInternal(), p.record());
+        };
+        return new TelemetryPolicySource() {
+            @Override
+            public TelemetryPolicy policy(SpanStart span) {
+                try {
+                    return view.apply(policy.policy(span));
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
+
+            @Override
+            public TelemetryPolicy cachedPolicy() {
+                try {
+                    return view.apply(policy.cachedPolicy());
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
+
+            @Override
+            public TelemetryPolicy policy(SpanStart span, TelemetryPolicy.Need need) {
+                try {
+                    return view.apply(policy.policy(span, need));
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
+
+            @Override
+            public TelemetryPolicy cachedPolicy(TelemetryPolicy.Need need) {
+                try {
+                    return view.apply(policy.cachedPolicy(need));
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
+
+            @Override
+            public boolean sampleRatioInPlay() {
+                return policy.sampleRatioInPlay();
+            }
+        };
     }
 }

@@ -46,6 +46,8 @@ dependencies {
     testImplementation 'io.opentelemetry:opentelemetry-api:1.66.0'
     testImplementation 'io.opentelemetry:opentelemetry-sdk:1.66.0'
     testImplementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.66.0'
+    // Drives the real autoconfigure path (SPI discovery, otel.sdk.disabled) in tests.
+    testImplementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.66.0'
     testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.66.0'
 }
 

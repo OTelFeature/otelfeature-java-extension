@@ -50,10 +50,13 @@ class SuppressedSpanRegistry {
     /** A suppressed span's parent, and whether the span has ended yet. */
     private static final class Entry {
         final SpanContext parent;
+        /** Whether the span's whole local subtree is suppressed with it. */
+        final boolean subtree;
         volatile boolean ended;
 
-        Entry(SpanContext parent) {
+        Entry(SpanContext parent, boolean subtree) {
             this.parent = parent;
+            this.subtree = subtree;
         }
     }
 
@@ -86,10 +89,33 @@ class SuppressedSpanRegistry {
      * @param parentContext the suppressed span's parent context
      */
     void record(String spanId, SpanContext parentContext) {
+        record(spanId, parentContext, false);
+    }
+
+    /**
+     * Records a suppressed span, optionally with its whole local subtree.
+     *
+     * @param spanId the suppressed span's ID
+     * @param parentContext the suppressed span's parent context
+     * @param subtree {@code true} if every local descendant is suppressed too
+     *     (a request {@code recordSpan} dropped as a whole)
+     */
+    void record(String spanId, SpanContext parentContext, boolean subtree) {
         if (map.size() >= nextSweep.get()) {
             sweep();
         }
-        map.put(spanId, new Entry(parentContext));
+        map.put(spanId, new Entry(parentContext, subtree));
+    }
+
+    /**
+     * Whether a span with this local parent belongs to a suppressed subtree.
+     *
+     * @param parentSpanId the parent's span ID
+     * @return {@code true} if the parent was suppressed with its subtree
+     */
+    boolean suppressesSubtree(String parentSpanId) {
+        Entry entry = map.get(parentSpanId);
+        return entry != null && entry.subtree;
     }
 
     /**
