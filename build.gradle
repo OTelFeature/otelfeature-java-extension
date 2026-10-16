@@ -1,7 +1,7 @@
 plugins {
     id 'java-library'
-    // Produces the single self-contained extension JAR. Needed even though
-    // nothing is relocated: gRPC discovers ManagedChannelProvider and
+    // Produces the single self-contained extension JAR. Needed for more than
+    // the one relocation below: gRPC discovers ManagedChannelProvider and
     // NameResolverProvider through META-INF/services, and a naive fat JAR would
     // let one dependency's service file overwrite another's.
     id 'com.gradleup.shadow' version '9.6.1'
@@ -33,6 +33,13 @@ dependencies {
         // The agent supplies opentelemetry-api at runtime, and relocates the
         // io.opentelemetry references inside extension classes to match. A
         // second copy shipped in here would be a different set of classes.
+        exclude group: 'io.opentelemetry'
+    }
+    // The opt-in tracing hook for the extension's own evaluations
+    // (OTELFEATURE_OPENFEATURE_TRACING_HOOK, see EvaluationTracing). Its
+    // opentelemetry-api is the agent's, as above; the semconv constants it
+    // reads are bundled and relocated (shadowJar below).
+    implementation('dev.openfeature.contrib.hooks:otel:3.3.1') {
         exclude group: 'io.opentelemetry'
     }
     // The flagd provider logs through SLF4J. Without a binding it prints a
@@ -67,6 +74,25 @@ shadowJar {
     // resolver, and with it the ability to resolve "flagd:8015" at all.
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
+
+    // The agent remaps io.opentelemetry.semconv in extension classes to its
+    // own shaded copy, which need not hold the incubating 1.28 constants the
+    // tracing hook was compiled against. Our own copy, under our own name,
+    // is out of the remapper's reach.
+    relocate 'io.opentelemetry.semconv', 'io.otelfeature.shaded.io.opentelemetry.semconv'
+
+    // Nothing may ship under io/opentelemetry/: the API is the agent's, and
+    // anything else there (semconv without the relocation above) would be
+    // remapped by the agent to classes it may not have.
+    doLast {
+        new java.util.zip.ZipFile(archiveFile.get().asFile).withCloseable { zip ->
+            def leaked = zip.entries().collect { it.name }.findAll { it.startsWith('io/opentelemetry/') }
+            if (leaked) {
+                throw new GradleException("shadowJar bundles ${leaked.size()} entries under io/opentelemetry/,"
+                        + " e.g. ${leaked.take(3)}")
+            }
+        }
+    }
 }
 
 // So `gradle build` produces the extension JAR, not just the thin one.
