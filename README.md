@@ -545,6 +545,33 @@ If flagd is unreachable, the extension defaults to **no suppression** (all
 spans exported); once connected, the provider keeps the last known ruleset
 across transient stream errors.
 
+## Releases
+
+Releases are GitHub Releases with `otelfeature-java-extension.jar`
+attached. Pushing a `v*` tag runs the `release` job in
+[ci.yml](.github/workflows/ci.yml): it checks that the tag matches the
+`version` in `build.gradle` (`v0.4.0` for `0.4.0`), builds and tests in the
+`ci/Dockerfile` toolchain image, and creates the release. A release
+candidate tag of the same version, `v0.4.0-rc.1`, is accepted too and becomes
+a pre-release; that is how unreleased code reaches the demo stage, which only
+uses released versions (spec C-006 in OTelFeature/poc).
+
+An rc tag is always `v<build.gradle version>-rc.N`; the release job rejects
+any other tag. To try unreleased code, tag the commit that has the target
+version in `build.gradle` (for example a branch with `0.4.1` for
+`v0.4.1-rc.1`).
+
+To cut a release: bump `version` in `build.gradle` in a PR, merge it, then
+push a release candidate from `main` to rehearse the pipeline, and the real
+tag once the candidate's release looks right. Check the generated notes of
+the final release: GitHub may compare against the rc instead of the previous
+final release, in which case edit the notes by hand:
+
+```sh
+git tag v0.4.0-rc.1 && git push origin v0.4.0-rc.1
+git tag v0.4.0 && git push origin v0.4.0
+```
+
 ## Development
 
 The only host requirement is **Docker** (on Windows, run it in WSL). The
