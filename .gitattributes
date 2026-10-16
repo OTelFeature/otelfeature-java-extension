@@ -1,0 +1,7 @@
+# Files that run in Linux containers keep LF on every checkout, whatever
+# core.autocrlf says on the host (a CRLF Dockerfile heredoc or Makefile recipe breaks).
+ci/Dockerfile text eol=lf
+Makefile text eol=lf
+*.sh text eol=lf
+.dockerignore text eol=lf
+ci/warm-cache.gradle text eol=lf

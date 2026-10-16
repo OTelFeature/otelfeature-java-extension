@@ -545,15 +545,35 @@ If flagd is unreachable, the extension defaults to **no suppression** (all
 spans exported); once connected, the provider keeps the last known ruleset
 across transient stream errors.
 
-## Building
+## Development
+
+The only host requirement is **Docker** (on Windows, run it in WSL). The
+toolchain, JDK 21 and Gradle 9.7.1 with every dependency already downloaded,
+is an image defined in [`ci/Dockerfile`](ci/Dockerfile), and CI builds and
+uses the same image.
 
 ```sh
-gradle build --no-daemon
-# Output: build/libs/otelfeature-java-extension.jar
+make test    # compile, test and package in the toolchain image, as CI does
+make jar     # just build/libs/otelfeature-java-extension.jar, no tests
+make shell   # a shell in the toolchain image, repo mounted at /src
 ```
 
-Requires Java 21+ and Gradle 9+ (the shadow plugin's floor; CI pins
-9.7.1 rather than relying on whatever the runner image ships).
+- The first run builds the image. After that, only a change to
+  `build.gradle` / `settings.gradle` rebuilds its dependency layer. Builds in
+  it run `--offline`, so a dependency missing from the image fails loudly
+  instead of being downloaded on every run.
+- Everything runs as your user, so `build/` stays yours (not root's).
+- To build the JAR from a git ref without a checkout (as the
+  [poc](https://github.com/OTelFeature/poc) end-to-end suite does), use the
+  `jar` stage (JAR at `/out/otelfeature-java-extension.jar`) or the `artifact`
+  stage:
+
+  ```sh
+  docker build --target artifact --output type=local,dest=out -f ci/Dockerfile     https://github.com/OTelFeature/otelfeature-java-extension.git#main
+  ```
+
+Without Docker, `gradle build` works too, with Java 21+ and Gradle 9+ (the
+shadow plugin's floor).
 
 ## Dependencies
 

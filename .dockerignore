@@ -1,0 +1,7 @@
+# Build context for ci/Dockerfile: only what the build needs.
+.git
+.gradle
+build
+out
+*.iml
+.idea
