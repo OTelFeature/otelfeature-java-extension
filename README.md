@@ -545,6 +545,11 @@ If flagd is unreachable, the extension defaults to **no suppression** (all
 spans exported); once connected, the provider keeps the last known ruleset
 across transient stream errors.
 
+The agent's standard `OTEL_*` variables still apply. Which of them a flag can
+replace live, and which stay startup-only or hard floors, is listed in the poc
+README:
+[Which `OTEL_*` env vars can be live flags](https://github.com/OTelFeature/poc#which-otel_-env-vars-can-be-live-flags).
+
 ## Releases
 
 Releases are GitHub Releases with `otelfeature-java-extension.jar`
