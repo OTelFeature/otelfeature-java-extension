@@ -82,6 +82,12 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
                 "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
                         + " (" + Enforcement.ENV + ")");
 
+        // The resource is the process-wide part of every evaluation context.
+        autoConfiguration.addResourceCustomizer((resource, config) -> {
+            policy.setResource(resource);
+            return resource;
+        });
+
         AtomicBoolean samplerInstalled = new AtomicBoolean();
         if (mode == Enforcement.SAMPLER) {
             autoConfiguration.addSamplerCustomizer((sampler, config) -> {
@@ -130,10 +136,10 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
     static TelemetryPolicySource processorPolicy(
             TelemetryPolicySource policy, Enforcement mode, BooleanSupplier samplerInstalled) {
         AtomicBoolean warned = new AtomicBoolean();
-        return () -> {
+        return span -> {
             TelemetryPolicy p;
             try {
-                p = policy.policy();
+                p = policy.policy(span);
             } catch (Throwable t) {
                 return TelemetryPolicy.FULL;
             }

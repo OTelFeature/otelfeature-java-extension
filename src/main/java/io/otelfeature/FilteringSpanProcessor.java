@@ -81,7 +81,13 @@ public class FilteringSpanProcessor implements SpanProcessor {
         //
         // This is also where the decision is taken for the span's whole
         // lifetime: onEnd reads the registry instead of the flag.
-        if (policy.policy().suppresses(span.getKind())) {
+        SpanStart start = new SpanStart(
+                span.getSpanContext().getTraceId(),
+                span.getName(),
+                span.getKind(),
+                span.getAttributes(),
+                span.getInstrumentationScopeInfo());
+        if (policy.policy(start).suppresses(span.getKind())) {
             SpanContext parent = span.getParentSpanContext();
             // A suppressed root span is recorded against an invalid parent, so
             // onEnd can still find it and its children are promoted to roots

@@ -20,9 +20,12 @@ import dev.openfeature.contrib.providers.flagd.Config;
 import dev.openfeature.contrib.providers.flagd.FlagdOptions;
 import dev.openfeature.contrib.providers.flagd.FlagdProvider;
 import dev.openfeature.sdk.Client;
+import dev.openfeature.sdk.EvaluationContext;
 import dev.openfeature.sdk.EventDetails;
 import dev.openfeature.sdk.OpenFeatureAPI;
+import io.opentelemetry.sdk.resources.Resource;
 import java.util.List;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -87,6 +90,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     private final OpenFeatureAPI api;
     private final TelemetryFlag<String, TelemetryLevel> levelFlag;
     private final TelemetryFlag<Boolean, Boolean> enabledFlag;
+    private final EvaluationContextFactory contexts = new EvaluationContextFactory();
 
     /**
      * {@code false} when the startup defaults disable the SDK: a hard floor no
@@ -178,18 +182,69 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     }
 
     @Override
-    public TelemetryPolicy policy() {
+    public TelemetryPolicy policy(SpanStart span) {
         // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
         // they never enable what the environment turned off.
         if (!floorEnabled) {
             return TelemetryPolicy.DISABLED;
         }
+        // Static flags first, without building anything: two volatile reads.
+        Boolean enabled = enabledFlag.cachedDecision();
+        if (enabled != null) {
+            if (!enabled) {
+                return TelemetryPolicy.DISABLED;
+            }
+            TelemetryLevel level = levelFlag.cachedDecision();
+            if (level != null) {
+                return of(level);
+            }
+        }
+        // At least one flag must be evaluated: build the span's context once,
+        // on first use, and share it between the two.
+        LazyContext context = new LazyContext(contexts, span);
         // The kill switch first: while it is off, telemetryLevel is not asked.
-        if (!enabledFlag.value()) {
+        if (!enabledFlag.value(context)) {
             return TelemetryPolicy.DISABLED;
         }
-        TelemetryLevel level = levelFlag.value();
+        return of(levelFlag.value(context));
+    }
+
+    private static TelemetryPolicy of(TelemetryLevel level) {
         return TelemetryPolicy.of(level != TelemetryLevel.OFF, level == TelemetryLevel.IO);
+    }
+
+    /**
+     * Captures the resource, the process-wide part of every evaluation context.
+     *
+     * @param resource the SDK's final resource
+     */
+    void setResource(Resource resource) {
+        contexts.setResource(resource);
+    }
+
+    /** Builds a span's evaluation context the first time a flag asks for it. */
+    private static final class LazyContext implements Supplier<EvaluationContext> {
+        private final EvaluationContextFactory factory;
+        private final SpanStart span;
+        private EvaluationContext built;
+
+        LazyContext(EvaluationContextFactory factory, SpanStart span) {
+            this.factory = factory;
+            this.span = span;
+        }
+
+        @Override
+        public EvaluationContext get() {
+            if (built == null && span != null) {
+                built = factory.build(span);
+            }
+            return built;
+        }
+    }
+
+    /** For tests: the factory, to count how many contexts were built. */
+    EvaluationContextFactory contexts() {
+        return contexts;
     }
 
     @Override

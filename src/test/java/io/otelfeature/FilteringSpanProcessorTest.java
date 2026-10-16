@@ -77,7 +77,7 @@ class FilteringSpanProcessorTest {
         private volatile TelemetryPolicy policy = TelemetryPolicy.FULL;
 
         @Override
-        public TelemetryPolicy policy() {
+        public TelemetryPolicy policy(SpanStart span) {
             return policy;
         }
 

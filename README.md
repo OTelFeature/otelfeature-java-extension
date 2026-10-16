@@ -216,6 +216,56 @@ pushes the changed ruleset down the sync stream and the provider says so. The
 OFREP poller this replaced had no such signal — which is why it could only
 ever re-read the flag on a timer.
 
+### The evaluation context: just your OpenTelemetry attributes
+
+When a flag does have to be evaluated per span, it is evaluated against a
+context made of the names OpenTelemetry already uses, so a targeting rule reads
+like a query over your telemetry:
+
+| Source | Keys |
+|---|---|
+| Resource (once per process) | every resource attribute: `service.name`, `service.namespace`, `service.version`, `deployment.environment.name`, `telemetry.sdk.language`, … |
+| Instrumentation scope | `otel.scope.name`, `otel.scope.version` (processor decisions only: a `Sampler` is not told the scope, so sampler-mode decisions don't have these keys) |
+| Span at start | `span.kind` (lower-case semconv value: `server`, `client`, `internal`, `producer`, `consumer`), `span.name`, and every attribute set at start: `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service`, … |
+| `targetingKey` | the **trace id** (hex), so flagd's `fractional` puts a whole trace in the same bucket in every service |
+
+```json
+"targeting": {
+  "if": [
+    { "and": [
+      { "==": [{ "var": "service.name" }, "weather"] },
+      { "==": [{ "var": "span.kind" }, "server"] },
+      { "==": [{ "var": "url.path" }, "/health"] }
+    ] },
+    "off", "full"
+  ]
+}
+```
+
+**Shape.** Keys are nested by dot segment: `service.name` is sent as
+`{"service": {"name": "weather"}}`, because JsonLogic's `var` splits on dots in
+every flagd evaluator (see
+[OTelFeature/poc#22](https://github.com/OTelFeature/poc/issues/22)). Rule
+authors write the semconv name verbatim, `{"var": "service.name"}`. If a name is
+both a value and a namespace (a deprecated name next to its replacement, such
+as `db.system` and `db.system.name`), the namespace wins and the value is left
+out. For the same name from two sources, the later source wins: resource, then
+scope, then span attributes, then `span.kind` / `span.name`.
+
+**Only what exists at span start.** `http.route` and `http.response.status_code`
+are **not** in the context: the agent sets them after the span has started, and
+the decision is made before that. Target `url.path` instead.
+
+**Cost.** A static flag never builds a context: the answer is two volatile
+reads (5–19 ns per span in the integration test, with no allocation). A
+targeted flag builds the context and evaluates the rule. With the three-condition
+rule above, that was 7.5–9.6 µs per span on a developer laptop (JDK 21, flagd
+`FILE` resolver), of which 2.5–3 µs was building the context and the rest was
+flagd evaluating the rule. These are rough single-machine numbers from
+`FlagdEvaluationContextIntegrationTest.measuresPerSpanCost`, not a benchmark;
+[OTelFeature/poc#27](https://github.com/OTelFeature/poc/issues/27) measures the
+real thing.
+
 Filtering at the `SpanProcessor` level (before batching) means dropped spans
 never enter the `BatchSpanProcessor` queue, saving memory and CPU compared
 to exporter-level filtering. Children of suppressed `INTERNAL` spans are

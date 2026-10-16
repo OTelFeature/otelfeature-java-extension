@@ -86,15 +86,16 @@ final class FlagAwareSampler implements Sampler {
         // enabled again, children are the delegate's call as usual - a
         // non-parent-based delegate may then sample the rest of a trace whose
         // root was dropped.
-        if ((localRoot || !parent.isSampled()) && !enabled()) {
+        if ((localRoot || !parent.isSampled())
+                && !enabled(new SpanStart(traceId, name, spanKind, attributes, null))) {
             return SamplingResult.drop();
         }
         return delegate.shouldSample(parentContext, traceId, name, spanKind, attributes, parentLinks);
     }
 
-    private boolean enabled() {
+    private boolean enabled(SpanStart span) {
         try {
-            return policy.policy().enabled();
+            return policy.policy(span).enabled();
         } catch (Throwable t) {
             // The source is not supposed to throw; if it does anyway, tracing
             // stays as the delegate would have it. Warn once, not per span.

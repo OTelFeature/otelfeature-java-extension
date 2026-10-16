@@ -325,12 +325,12 @@ class FlagAwareSamplerTest {
     @EnumSource(Enforcement.class)
     @DisplayName("the processor's policy read fails open")
     void processorPolicyFailsOpen(Enforcement mode) {
-        TelemetryPolicySource throwing = () -> {
+        TelemetryPolicySource throwing = span -> {
             throw new IllegalStateException("provider exploded");
         };
 
         assertEquals(TelemetryPolicy.FULL,
-                OtelfeatureCustomizer.processorPolicy(throwing, mode, () -> true).policy());
+                OtelfeatureCustomizer.processorPolicy(throwing, mode, () -> true).policy(null));
     }
 
     @Test
@@ -355,7 +355,7 @@ class FlagAwareSamplerTest {
     @Test
     @DisplayName("a drop keeps the parent's trace state")
     void dropKeepsTraceState() {
-        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), () -> TelemetryPolicy.DISABLED);
+        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), span -> TelemetryPolicy.DISABLED);
         TraceState state = TraceState.builder().put("vendor", "value").build();
         SpanContext upstream = SpanContext.createFromRemoteParent(
                 "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331", TraceFlags.getSampled(), state);
@@ -389,7 +389,7 @@ class FlagAwareSamplerTest {
                 "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331",
                 TraceFlags.getSampled(), TraceState.getDefault()));
 
-        new FlagAwareSampler(recording, () -> TelemetryPolicy.FULL).shouldSample(
+        new FlagAwareSampler(recording, span -> TelemetryPolicy.FULL).shouldSample(
                 Context.root(), "0af7651916cd43dd8448eb211c80319c", "root", SpanKind.CONSUMER,
                 Attributes.empty(), List.of(link));
 
@@ -399,7 +399,7 @@ class FlagAwareSamplerTest {
     @Test
     @DisplayName("a policy that cannot be read delegates (fail open)")
     void unreadablePolicyDelegates() {
-        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), () -> {
+        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), span -> {
             throw new IllegalStateException("provider exploded");
         });
 
@@ -411,7 +411,7 @@ class FlagAwareSamplerTest {
     @Test
     @DisplayName("enabled: the delegate decides, including to drop")
     void enabledDelegates() {
-        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOff(), () -> TelemetryPolicy.FULL);
+        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOff(), span -> TelemetryPolicy.FULL);
 
         assertEquals(SamplingDecision.DROP, sampler.shouldSample(
                 Context.root(), "0af7651916cd43dd8448eb211c80319c", "root", SpanKind.SERVER,
@@ -421,7 +421,7 @@ class FlagAwareSamplerTest {
     @Test
     @DisplayName("getDescription names the delegate")
     void description() {
-        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), () -> TelemetryPolicy.FULL);
+        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), span -> TelemetryPolicy.FULL);
 
         assertEquals("FlagAwareSampler{delegate=AlwaysOnSampler}", sampler.getDescription());
     }

@@ -28,15 +28,19 @@ package io.otelfeature;
 public interface TelemetryPolicySource {
 
     /**
-     * Returns the current policy.
+     * Returns the policy for a span that is about to start.
+     *
+     * <p>A static flag answers without looking at the span; a targeted one is
+     * evaluated against the span's context (see {@link EvaluationContextFactory}).
      *
      * <p>Called on the span hot path, from whatever thread created the span, so
      * implementations must be thread-safe, cheap and must never throw: a flag
      * that cannot be resolved falls back to its startup default.
      *
-     * @return the policy the next span is subject to
+     * @param span the span the decision is for
+     * @return the policy that span is subject to
      */
-    TelemetryPolicy policy();
+    TelemetryPolicy policy(SpanStart span);
 
     /** Releases whatever backs this source. The default does nothing. */
     default void shutdown() {}

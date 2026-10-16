@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -163,12 +164,24 @@ final class TelemetryFlag<T, R> {
      * @return never {@code null}
      */
     R value() {
+        return value(() -> null);
+    }
+
+    /**
+     * What the flag means for the next span.
+     *
+     * @param context builds the span's evaluation context; called only when
+     *     the flag is not static and actually has to be evaluated, so the
+     *     cached path builds nothing
+     * @return never {@code null}
+     */
+    R value(Supplier<EvaluationContext> context) {
         R decision = cached.get();
         if (decision != null) {
             // The point of the whole exercise: a volatile read, and done.
             return decision;
         }
-        return interpret(evaluate.apply(evaluationContext()));
+        return interpret(evaluate.apply(context.get()));
     }
 
     private R interpret(FlagEvaluationDetails<T> details) {
@@ -227,19 +240,6 @@ final class TelemetryFlag<T, R> {
         log.log(quietly ? Level.FINE : Level.WARNING, message);
     }
 
-    /**
-     * The evaluation context handed to a non-static evaluation.
-     *
-     * <p>{@code null} for now - this is the seam for contextual evaluation.
-     * Describing the span, and eventually its OTel attributes, to a targeting
-     * rule goes here; the caching rule above already handles such a flag
-     * correctly by evaluating it for every span.
-     *
-     * @return the evaluation context, or {@code null} for none
-     */
-    private EvaluationContext evaluationContext() {
-        return null;
-    }
 
     /**
      * The kept answer, or {@code null} when every span is evaluated. For tests.
