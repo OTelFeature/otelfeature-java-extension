@@ -131,6 +131,8 @@ class FlagdTelemetryPolicyIntegrationTest {
         write(staticFlags("full"));
 
         telemetryLevel = policyWithDefaults(TelemetryPolicy.FULL);
+        // Not a cached value: a fallback cached before READY satisfies that too.
+        assertTrue(waitFor(() -> telemetryLevel.providerReady()), "provider never became ready");
     }
 
     private FlagdTelemetryPolicy policyWithDefaults(TelemetryPolicy defaults) {
@@ -311,6 +313,7 @@ class FlagdTelemetryPolicyIntegrationTest {
                 }
                 """);
         telemetryLevel = policyWithDefaults(TelemetryPolicy.DISABLED);
+        assertTrue(waitFor(() -> telemetryLevel.providerReady()), "provider never became ready");
 
         assertTrue(waitFor(() -> Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
                 "provider never classified otelEnabled");
