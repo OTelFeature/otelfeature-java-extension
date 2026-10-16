@@ -102,7 +102,7 @@ between them.
 | Which spans `OFF` drops | every span | every **local root** (no parent, or a remote parent) and so its whole subtree |
 | Cost of dropped spans | fully paid (created, populated, then dropped) | only the non-recording span the instrumentation still asks for |
 | `traceparent` sent downstream while `OFF` | `sampled=1` → downstream orphans | `sampled=0` → downstream stops too |
-| Flag flipped mid-request | the rest of the trace is dropped | the trace finishes whole, the next one is dropped |
+| Flag flipped mid-request | the rest of the trace is dropped | the trace finishes (minus its `INTERNAL` spans, as under `IO`), the next one is dropped |
 | `telemetryLevel=IO` (`INTERNAL`) | processor | processor (unchanged) |
 
 ```sh
@@ -118,7 +118,12 @@ mid-trace, which is why `INTERNAL` suppression stays in the processor in both
 modes: there, a dropped span's children survive and are re-parented. The
 sampler wraps whatever sampler the agent is configured with; when tracing is
 enabled, that sampler decides exactly as before (`getDescription()` reports
-`FlagAwareSampler{delegate=...}`).
+`FlagAwareSampler{delegate=...}`). While disabled, children of an unsampled
+local parent are dropped too, so a non-parent-based sampler
+(`OTEL_TRACES_SAMPLER=always_on`) cannot turn them into orphans; once tracing
+is back on, only a parent-based sampler keeps a dropped trace dropped to its
+end. If the agent never applies the sampler customizer, the processor keeps
+enforcing `OFF` and logs a warning.
 
 ## How it works
 
@@ -322,7 +327,7 @@ shipping a second one.
 | Instrumentation approach | SDK configurator | `-javaagent` bytecode instrumentation |
 | flagd connection | gRPC (in-process resolver, port 8015) | gRPC (in-process resolver, port 8015) |
 | Span suppression | Configures tracer to not emit INTERNAL spans | Filters INTERNAL spans at SpanProcessor level (before batching) |
-| `OFF` / `otelEnabled=false` | Suppressed at span creation: saves export **and** CPU | `processor`: dropped at `onEnd`, saves export, **not** CPU; `sampler`: roots never created, saves both |
+| `OFF` / `otelEnabled=false` | Suppressed at span creation: saves export **and** CPU | `processor`: dropped at `onEnd`, saves export, **not** CPU; `sampler`: roots never recorded, saves export and recording cost |
 | Flag updates | Push (gRPC sync stream) | Push (gRPC sync stream) |
 | Flag evaluation | Once while static, per span while targeted | Once while static, per span while targeted |
 | Service code changes | None | None |

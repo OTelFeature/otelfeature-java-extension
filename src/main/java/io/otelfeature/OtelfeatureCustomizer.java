@@ -18,6 +18,8 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
 
 /**
@@ -80,12 +82,15 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
                 "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
                         + " (" + Enforcement.ENV + ")");
 
+        AtomicBoolean samplerInstalled = new AtomicBoolean();
         if (mode == Enforcement.SAMPLER) {
-            autoConfiguration.addSamplerCustomizer(
-                    (sampler, config) -> new FlagAwareSampler(sampler, policy));
+            autoConfiguration.addSamplerCustomizer((sampler, config) -> {
+                samplerInstalled.set(true);
+                return new FlagAwareSampler(sampler, policy);
+            });
         }
 
-        TelemetryPolicySource processorPolicy = processorPolicy(policy, mode);
+        TelemetryPolicySource processorPolicy = processorPolicy(policy, mode, samplerInstalled::get);
         autoConfiguration.addSpanProcessorCustomizer(
                 (processor, config) -> new FilteringSpanProcessor(processor, processorPolicy, registry));
 
@@ -104,16 +109,46 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
      * <p>In sampler mode {@code enabled} belongs to {@link FlagAwareSampler}
      * alone: it drops local roots, and a trace that was already sampled when
      * the flag flipped is left to finish whole rather than lose its tail at
-     * the processor. The processor keeps {@code suppressInternal} in both modes.
+     * the processor. The processor keeps {@code suppressInternal} in both modes
+     * - and while disabled it keeps suppressing {@code INTERNAL} spans of those
+     * in-flight traces, so turning telemetry off never exports more than
+     * {@code IO} would.
+     *
+     * <p>If sampler mode was asked for but the sampler customizer never ran
+     * (a host that sets its own sampler after autoconfiguration, say), the
+     * processor keeps enforcing {@code enabled} itself, so {@code OFF} still
+     * works, and says so once.
+     *
+     * <p>A policy read that throws fails open to {@link TelemetryPolicy#FULL}
+     * rather than throwing into the instrumented application's thread.
      *
      * @param policy the full policy
      * @param mode where {@code enabled} is enforced
+     * @param samplerInstalled whether {@link FlagAwareSampler} was actually built
      * @return the policy the processor should apply
      */
-    static TelemetryPolicySource processorPolicy(TelemetryPolicySource policy, Enforcement mode) {
-        if (mode == Enforcement.PROCESSOR) {
-            return policy;
-        }
-        return () -> TelemetryPolicy.of(true, policy.policy().suppressInternal());
+    static TelemetryPolicySource processorPolicy(
+            TelemetryPolicySource policy, Enforcement mode, BooleanSupplier samplerInstalled) {
+        AtomicBoolean warned = new AtomicBoolean();
+        return () -> {
+            TelemetryPolicy p;
+            try {
+                p = policy.policy();
+            } catch (Throwable t) {
+                return TelemetryPolicy.FULL;
+            }
+            if (mode == Enforcement.PROCESSOR) {
+                return p;
+            }
+            if (!samplerInstalled.getAsBoolean()) {
+                if (warned.compareAndSet(false, true)) {
+                    Logger.getLogger(OtelfeatureCustomizer.class.getName()).warning(
+                            "otelfeature-java-extension: " + Enforcement.ENV + "=sampler, but the agent"
+                                    + " never applied the sampler customizer - enforcing at the processor");
+                }
+                return p;
+            }
+            return TelemetryPolicy.of(true, !p.enabled() || p.suppressInternal());
+        };
     }
 }

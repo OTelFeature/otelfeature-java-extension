@@ -33,7 +33,9 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.samplers.Sampler;
+import io.opentelemetry.sdk.trace.data.LinkData;
 import io.opentelemetry.sdk.trace.samplers.SamplingDecision;
+import io.opentelemetry.sdk.trace.samplers.SamplingResult;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -64,19 +66,28 @@ class FlagAwareSamplerTest {
     private Tracer tracer;
 
     private void setUp(Enforcement mode) {
+        setUp(mode, mode == Enforcement.SAMPLER);
+    }
+
+    /**
+     * @param mode the configured enforcement
+     * @param installSampler whether the agent actually applied the sampler
+     *     customizer (only meaningful in sampler mode)
+     */
+    private void setUp(Enforcement mode, boolean installSampler) {
         policy = new FilteringSpanProcessorTest.TestPolicy();
         exporter = new FilteringSpanProcessorTest.InMemoryExporter();
         counting = new FilteringSpanProcessorTest.CountingProcessor();
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
 
         Sampler agentDefault = Sampler.parentBased(Sampler.alwaysOn());
-        Sampler sampler = mode == Enforcement.SAMPLER ? new FlagAwareSampler(agentDefault, policy) : agentDefault;
+        Sampler sampler = installSampler ? new FlagAwareSampler(agentDefault, policy) : agentDefault;
 
         tracerProvider = SdkTracerProvider.builder()
                 .setSampler(sampler)
                 .addSpanProcessor(new FilteringSpanProcessor(
                         SimpleSpanProcessor.create(new ReparentingSpanExporter(exporter, registry)),
-                        OtelfeatureCustomizer.processorPolicy(policy, mode),
+                        OtelfeatureCustomizer.processorPolicy(policy, mode, () -> installSampler),
                         registry))
                 .addSpanProcessor(counting)
                 .build();
@@ -277,9 +288,113 @@ class FlagAwareSamplerTest {
         assertEquals(0, counting.onStartCount.get(), "the DB leaf must not be sampled as an orphan");
     }
 
+    @Test
+    @DisplayName("sampler mode: flipping IO to OFF mid-trace never exports more than IO did")
+    void ioToOffMidTraceKeepsInternalSuppressed() {
+        setUp(Enforcement.SAMPLER);
+        policy.setPolicy(TelemetryPolicy.IO);
+
+        Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
+        policy.setPolicy(TelemetryPolicy.DISABLED);
+        try (var s1 = server.makeCurrent()) {
+            Span internal = tracer.spanBuilder("controller").setSpanKind(SpanKind.INTERNAL).startSpan();
+            try (var s2 = internal.makeCurrent()) {
+                tracer.spanBuilder("db").setSpanKind(SpanKind.CLIENT).startSpan().end();
+            }
+            internal.end();
+        }
+        server.end();
+
+        assertEquals(List.of("db", "server"), exportedNames(),
+                "the in-flight trace finishes, but its INTERNAL span stays suppressed");
+    }
+
+    @Test
+    @DisplayName("sampler mode without the sampler installed: the processor still enforces OFF")
+    void processorEnforcesOffWhenSamplerMissing() {
+        setUp(Enforcement.SAMPLER, false);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
+
+        healthCheck();
+        requestWithDbLeaf();
+
+        assertEquals(List.of(), exportedNames(), "OFF must not silently do nothing");
+    }
+
+    @ParameterizedTest
+    @EnumSource(Enforcement.class)
+    @DisplayName("the processor's policy read fails open")
+    void processorPolicyFailsOpen(Enforcement mode) {
+        TelemetryPolicySource throwing = () -> {
+            throw new IllegalStateException("provider exploded");
+        };
+
+        assertEquals(TelemetryPolicy.FULL,
+                OtelfeatureCustomizer.processorPolicy(throwing, mode, () -> true).policy());
+    }
+
+    @Test
+    @DisplayName("sampler mode, enabled: a sampled incoming request is sampled")
+    void sampledRemoteParentIsSampledWhileEnabled() {
+        setUp(Enforcement.SAMPLER);
+
+        SpanContext upstream = SpanContext.createFromRemoteParent(
+                "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331",
+                TraceFlags.getSampled(), TraceState.getDefault());
+        tracer.spanBuilder("GET /orders").setSpanKind(SpanKind.SERVER)
+                .setParent(Context.root().with(Span.wrap(upstream))).startSpan().end();
+
+        assertEquals(List.of("GET /orders"), exportedNames());
+        assertEquals("b7ad6b7169203331", exporter.spans.get(0).getParentSpanId());
+    }
+
     // ----------------------------------------------------------------------
     // The sampler on its own
     // ----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("a drop keeps the parent's trace state")
+    void dropKeepsTraceState() {
+        FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), () -> TelemetryPolicy.DISABLED);
+        TraceState state = TraceState.builder().put("vendor", "value").build();
+        SpanContext upstream = SpanContext.createFromRemoteParent(
+                "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331", TraceFlags.getSampled(), state);
+
+        SamplingResult result = sampler.shouldSample(
+                Context.root().with(Span.wrap(upstream)), upstream.getTraceId(), "GET /orders",
+                SpanKind.SERVER, Attributes.empty(), List.of());
+
+        assertEquals(SamplingDecision.DROP, result.getDecision());
+        assertEquals(state, result.getUpdatedTraceState(state));
+    }
+
+    @Test
+    @DisplayName("links are handed to the delegate unchanged")
+    void linksReachTheDelegate() {
+        List<LinkData> seen = new java.util.ArrayList<>();
+        Sampler recording = new Sampler() {
+            @Override
+            public SamplingResult shouldSample(Context parentContext, String traceId, String name,
+                    SpanKind spanKind, Attributes attributes, List<LinkData> parentLinks) {
+                seen.addAll(parentLinks);
+                return SamplingResult.recordAndSample();
+            }
+
+            @Override
+            public String getDescription() {
+                return "recording";
+            }
+        };
+        LinkData link = LinkData.create(SpanContext.create(
+                "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331",
+                TraceFlags.getSampled(), TraceState.getDefault()));
+
+        new FlagAwareSampler(recording, () -> TelemetryPolicy.FULL).shouldSample(
+                Context.root(), "0af7651916cd43dd8448eb211c80319c", "root", SpanKind.CONSUMER,
+                Attributes.empty(), List.of(link));
+
+        assertEquals(List.of(link), seen);
+    }
 
     @Test
     @DisplayName("a policy that cannot be read delegates (fail open)")

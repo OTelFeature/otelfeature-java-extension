@@ -25,6 +25,7 @@ import io.opentelemetry.sdk.trace.data.LinkData;
 import io.opentelemetry.sdk.trace.samplers.Sampler;
 import io.opentelemetry.sdk.trace.samplers.SamplingResult;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -61,6 +62,7 @@ final class FlagAwareSampler implements Sampler {
 
     private final Sampler delegate;
     private final TelemetryPolicySource policy;
+    private final AtomicBoolean warned = new AtomicBoolean();
 
     FlagAwareSampler(Sampler delegate, TelemetryPolicySource policy) {
         this.delegate = delegate;
@@ -77,10 +79,13 @@ final class FlagAwareSampler implements Sampler {
             List<LinkData> parentLinks) {
         SpanContext parent = Span.fromContext(parentContext).getSpanContext();
         boolean localRoot = !parent.isValid() || parent.isRemote();
-        // A local parent that was not sampled is a root we (or the delegate)
-        // dropped: keep its children dropped too, even with a delegate that is
-        // not parent-based (OTEL_TRACES_SAMPLER=always_on), which would
-        // otherwise sample them afresh as orphans.
+        // While disabled, a local parent that was not sampled is a root we (or
+        // the delegate) dropped: keep its children dropped too, even with a
+        // delegate that is not parent-based (OTEL_TRACES_SAMPLER=always_on),
+        // which would otherwise sample them afresh as orphans. Once tracing is
+        // enabled again, children are the delegate's call as usual - a
+        // non-parent-based delegate may then sample the rest of a trace whose
+        // root was dropped.
         if ((localRoot || !parent.isSampled()) && !enabled()) {
             return SamplingResult.drop();
         }
@@ -92,8 +97,11 @@ final class FlagAwareSampler implements Sampler {
             return policy.policy().enabled();
         } catch (Throwable t) {
             // The source is not supposed to throw; if it does anyway, tracing
-            // stays as the delegate would have it.
-            log.log(Level.FINE, "otelfeature-java-extension: policy unavailable, delegating", t);
+            // stays as the delegate would have it. Warn once, not per span.
+            boolean first = warned.compareAndSet(false, true);
+            log.log(first ? Level.WARNING : Level.FINE,
+                    "otelfeature-java-extension: policy unavailable, delegating"
+                            + (first ? " (further occurrences are logged at FINE)" : ""), t);
             return true;
         }
     }

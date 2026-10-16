@@ -27,7 +27,9 @@ import java.util.logging.Logger;
  *       at {@code onEnd}: never batched, serialised or sent, but created and
  *       populated first.</li>
  *   <li>{@code sampler} - {@link FlagAwareSampler} drops local roots before they
- *       exist: never created, and their subtree with them.</li>
+ *       are recorded, and their subtree with them: never recorded, so no
+ *       recording, processor or export cost (the instrumentation still runs
+ *       and hands out non-recording spans).</li>
  * </ul>
  *
  * <p>{@code INTERNAL} suppression ({@code telemetryLevel=IO}) stays in the
