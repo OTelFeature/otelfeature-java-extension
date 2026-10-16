@@ -500,17 +500,22 @@ extension's **isolated** OpenFeature API only, so the application's own
 OpenFeature API and its evaluations never see it.
 
 It is **off by default on purpose**: a static flag is not evaluated per span,
-but a flag with targeting, or one in an error state (during a flagd outage,
-say), is, and each evaluation adds an event: one per such flag per span start,
-so up to three on a child's parent (`otelEnabled`, `telemetryLevel`,
-`recordSpan`). On a busy service that is exactly the noise this project
-removes. Use it to debug a rule, not permanently.
+but a flag with targeting is, and each successful evaluation adds an event:
+one per such flag per span start, so up to three on a child's parent
+(`otelEnabled`, `telemetryLevel`, `recordSpan`). On a busy service that is
+exactly the noise this project removes. Use it to debug a rule, not
+permanently. A flag in an error state (during a flagd outage, say) is
+evaluated per span too, but records nothing: the hook writes an event only for
+an evaluation that succeeds, and errors are not recorded (below).
 
-Where the events land: on the span that is current while the flag is
-evaluated, the **parent** of the span being decided, since that span doesn't
-exist yet. So targeted evaluations for child spans show up on their parent,
-while evaluations for a **new root** (including every `traceSampleRatio`
-evaluation) have no current span and record nothing. Evaluation errors are
+Where the events land: on the span that is current on the thread while the
+flag is evaluated, usually the **parent** of the span being decided, since
+that span doesn't exist yet. So targeted evaluations for child spans show up
+on their parent, while evaluations for a **new root** started with no span
+current (which includes every `traceSampleRatio` evaluation of an incoming
+request) record nothing. A span started with an explicit parent while another
+span is current (a new root inside a request, async work) records on that
+current span instead. Evaluation errors are
 not recorded as exceptions on application spans: the hook has no switch for
 that, so the extension leaves out its error callback.
 

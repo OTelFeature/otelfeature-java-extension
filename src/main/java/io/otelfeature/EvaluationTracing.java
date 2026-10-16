@@ -22,6 +22,8 @@ import dev.openfeature.sdk.Hook;
 import dev.openfeature.sdk.HookContext;
 import java.util.Locale;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * The opt-in OpenFeature OpenTelemetry traces hook for the extension's own
@@ -31,8 +33,9 @@ import java.util.Map;
  * <p>{@link FlagdTelemetryPolicy} adds it to the client of its isolated
  * {@code OpenFeatureAPI}, so the application's own OpenFeature never sees it.
  * What it records, and where, is the hook's business: an event per
- * evaluation that is not served from the cache, on the span current at the
- * time - the parent of the span being decided, so a new root records nothing.
+ * successful evaluation that is not served from the cache, on the span current
+ * on the thread at the time - usually the parent of the span being decided,
+ * so a root started with no span current records nothing.
  */
 final class EvaluationTracing {
 
@@ -67,16 +70,31 @@ final class EvaluationTracing {
      * otherwise put one on an application span per evaluation.
      */
     @SuppressWarnings({"rawtypes", "unchecked"})
-    static final class ExtensionTracesHook extends TracesHook {
+    static class ExtensionTracesHook extends TracesHook {
+
+        private static final Logger log = Logger.getLogger(ExtensionTracesHook.class.getName());
+
+        /** Set once the hook's classes failed to link; it stays off from then on. */
+        private volatile boolean broken;
 
         @Override
         public void after(HookContext ctx, FlagEvaluationDetails details, Map hints) {
+            if (broken) {
+                return;
+            }
             try {
                 super.after(ctx, details, hints);
             } catch (RuntimeException e) {
                 // The SDK turns an exception from an after hook into an error
                 // and serves the default: never let a debugging aid change a
                 // telemetry decision.
+            } catch (LinkageError e) {
+                // The SDK doesn't catch Errors: this one would reach the
+                // application's startSpan(). Bundled classes that don't link
+                // (the semconv relocation lost, say) won't start linking later.
+                broken = true;
+                log.log(Level.WARNING, "otelfeature-java-extension: the OpenFeature tracing hook failed to"
+                        + " load - " + ENV + " has no effect", e);
             }
         }
 

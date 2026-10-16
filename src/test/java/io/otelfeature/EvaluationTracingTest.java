@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.openfeature.contrib.providers.flagd.Config;
 import dev.openfeature.contrib.providers.flagd.FlagdOptions;
+import dev.openfeature.sdk.Hook;
+import dev.openfeature.sdk.HookContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -41,6 +43,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -170,16 +173,30 @@ class EvaluationTracingTest {
         List<SpanData> spans = exporter.getFinishedSpanItems();
         assertEquals(5, spans.size());
         assertTrue(spans.stream().allMatch(s -> s.getEvents().isEmpty()));
+
+        // Positive control: the hook is attached and roots are evaluated - a
+        // root started while another span is current puts its event there.
+        exporter.reset();
+        Span outer = tracer().spanBuilder("outer").setSpanKind(SpanKind.SERVER).setNoParent().startSpan();
+        try (var s = outer.makeCurrent()) {
+            tracer().spanBuilder("inner-root").setNoParent().startSpan().end();
+        }
+        outer.end();
+        assertEquals(List.of("recordSpan"), flagEvents(byName().get("outer")).stream()
+                .map(e -> e.getAttributes().get(FLAG_KEY)).collect(Collectors.toList()));
     }
 
     @Test
     @DisplayName("on: a failing evaluation records no exception on the application's span")
     void onRecordsNoExceptions() throws IOException {
-        start(BROKEN_RECORD_SPAN, true);
-        assertTrue(waitFor(() -> policy.cachedRecord() == null), "recordSpan should be evaluated per span");
+        CountingHook hook = new CountingHook();
+        start(BROKEN_RECORD_SPAN, hook);
+        assertTrue(waitFor(() -> policy.recordEvaluatedPerSpan()), "recordSpan should be evaluated per span");
+        int before = hook.errors.get();
 
         request();
 
+        assertTrue(hook.errors.get() - before >= 2, "the SDK must have reached error() for both spans");
         Map<String, SpanData> spans = byName();
         assertEquals(2, spans.size(), "the failing flag falls back to recording");
         assertTrue(spans.values().stream().allMatch(s -> s.getEvents().isEmpty()),
@@ -229,6 +246,10 @@ class EvaluationTracingTest {
     }
 
     private void start(String flags, boolean tracingHook) throws IOException {
+        start(flags, tracingHook ? EvaluationTracing.hook() : null);
+    }
+
+    private void start(String flags, Hook<?> tracingHook) throws IOException {
         Path file = tempDir.resolve("flags.json");
         Files.writeString(file, flags, StandardCharsets.UTF_8);
         policy = new FlagdTelemetryPolicy("telemetryLevel", "otelEnabled", "recordSpan", "traceSampleRatio",
@@ -251,6 +272,18 @@ class EvaluationTracingTest {
                         OtelfeatureCustomizer.processorPolicy(policy, Enforcement.PROCESSOR, () -> false),
                         registry))
                 .build();
+    }
+
+    /** The extension's hook, counting the error callbacks the SDK makes. */
+    @SuppressWarnings("rawtypes")
+    private static final class CountingHook extends EvaluationTracing.ExtensionTracesHook {
+        final AtomicInteger errors = new AtomicInteger();
+
+        @Override
+        public void error(HookContext ctx, Exception error, Map hints) {
+            errors.incrementAndGet();
+            super.error(ctx, error, hints);
+        }
     }
 
     private Tracer tracer() {
