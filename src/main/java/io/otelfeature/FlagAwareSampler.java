@@ -50,7 +50,7 @@ import java.util.logging.Logger;
  *       was already sampled when the flag flipped finishes coherently instead
  *       of losing its tail.</li>
  *   <li>{@code recordSpan=false} for this span: {@code DROP} it if it is a
- *       trace root (no parent, or a remote parent that was not sampled) or a
+ *       trace root (a span with no parent at all) or a
  *       database client leaf ({@code CLIENT} with a wire-protocol
  *       {@code db.system.name}); any other span - including a request that
  *       arrives with a sampled {@code traceparent} - is left to
@@ -98,15 +98,13 @@ final class FlagAwareSampler implements Sampler {
         // root was dropped.
         boolean askEnabled = localRoot || !parent.isSampled();
         // recordSpan=false may only DROP where losing the subtree is the
-        // intended outcome: a trace root (no parent, or an upstream that did
-        // not sample it - the whole trace goes) or a leaf that propagates
+        // intended outcome: a trace root (the whole trace goes) or a leaf that propagates
         // nothing (a DB call over its own wire protocol). Anything else that
         // propagates mid-trace - including a request arriving with a sampled
         // traceparent - is left to the processor, which suppresses it and
         // re-parents its children, so downstream services never inherit
         // sampled=0.
-        boolean traceRoot = !parent.isValid() || (parent.isRemote() && !parent.isSampled());
-        boolean askRecord = traceRoot || isDatabaseLeaf(spanKind, attributes);
+        boolean askRecord = isRecordSpanRoot(parent) || isDatabaseLeaf(spanKind, attributes);
         if (askEnabled || askRecord) {
             TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes, askRecord);
             if (decision != null) {
@@ -119,6 +117,17 @@ final class FlagAwareSampler implements Sampler {
             }
         }
         return delegate.shouldSample(parentContext, traceId, name, spanKind, attributes, parentLinks);
+    }
+
+    /**
+     * Whether a span counts as a trace root for {@code recordSpan}: one with no
+     * parent at all. A span with a remote parent - sampled or not - is left
+     * to the processor for now; whether an unsampled remote parent should
+     * count as a root too is an open decision, and this is the one place to
+     * change it.
+     */
+    static boolean isRecordSpanRoot(SpanContext parent) {
+        return !parent.isValid();
     }
 
     /**

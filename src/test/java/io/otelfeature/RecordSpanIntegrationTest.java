@@ -339,8 +339,8 @@ class RecordSpanIntegrationTest {
     }
 
     @Test
-    @DisplayName("sampler mode: a request whose upstream did not sample it is a root, and is DROPped")
-    void unsampledRemoteParentIsARoot() throws IOException {
+    @DisplayName("sampler mode: a remote parent is not a root (for now), even unsampled: left to the processor")
+    void unsampledRemoteParentIsNotARoot() throws IOException {
         start(Enforcement.SAMPLER, flags(GLOBAL_ON, API_WEATHER));
         // An always-on delegate, so a delegate decision could not explain the drop.
         tracerProvider.shutdown();
@@ -352,7 +352,8 @@ class RecordSpanIntegrationTest {
         tracer("tomcat").spanBuilder("GET /api/weather").setSpanKind(SpanKind.SERVER)
                 .setParent(incoming(false)).setAttribute("url.path", "/api/weather").startSpan().end();
 
-        assertEquals(0, counting.onStartCount.get());
+        assertEquals(1, counting.onStartCount.get(),
+                "only a span with no parent is a recordSpan root; see FlagAwareSampler.isRecordSpanRoot");
     }
 
     @ParameterizedTest
