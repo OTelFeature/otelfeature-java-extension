@@ -30,9 +30,9 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  *       drops spans before they enter the batch queue when suppression is
  *       active ({@code INTERNAL} at {@code IO}, all of them at {@code OFF}).
  *       Records dropped span IDs in a shared registry.
- *       It asks {@link FlagdTelemetryLevel}, which syncs the flag ruleset
+ *       It asks {@link FlagdTelemetryPolicy}, which syncs the flag ruleset
  *       in-process from flagd and evaluates it only as often as the flag
- *       actually requires - see {@link TelemetryLevelResolver}.</li>
+ *       actually requires - see {@link TelemetryFlag}.</li>
  *   <li><b>ReparentingSpanExporter</b> (via {@code addSpanExporterCustomizer}):
  *       re-parents surviving spans whose parents were suppressed, using the
  *       shared registry to resolve the nearest non-suppressed ancestor.</li>
@@ -57,18 +57,18 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
 
     @Override
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
-        FlagdTelemetryLevel telemetryLevel = new FlagdTelemetryLevel();
+        FlagdTelemetryPolicy policy = new FlagdTelemetryPolicy();
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
 
         autoConfiguration.addSpanProcessorCustomizer(
-                (processor, config) -> new FilteringSpanProcessor(processor, telemetryLevel, registry));
+                (processor, config) -> new FilteringSpanProcessor(processor, policy, registry));
 
         autoConfiguration.addSpanExporterCustomizer(
                 (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
 
         // The provider holds a gRPC channel to flagd; close it on the way out
         // rather than leaving the sync stream to be torn down by the JVM.
-        Runtime.getRuntime().addShutdownHook(new Thread(telemetryLevel::shutdown,
+        Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
                 "otelfeature-shutdown"));
     }
 }

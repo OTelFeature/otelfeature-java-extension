@@ -72,19 +72,19 @@ class FilteringSpanProcessorTest {
         int count() { return spans.size(); }
     }
 
-    /** A telemetry level that is whatever the test says it is. */
-    static class TestTelemetryLevel implements TelemetryLevelSource {
-        private volatile TelemetryLevel level = TelemetryLevel.FULL;
+    /** A policy that is whatever the test says it is. */
+    static class TestPolicy implements TelemetryPolicySource {
+        private volatile TelemetryPolicy policy = TelemetryPolicy.FULL;
 
         @Override
-        public TelemetryLevel level() {
-            return level;
+        public TelemetryPolicy policy() {
+            return policy;
         }
 
-        /** {@code true} is {@code IO} (suppress INTERNAL), {@code false} is {@code FULL}. */
-        void setSuppress(boolean s) { this.level = s ? TelemetryLevel.IO : TelemetryLevel.FULL; }
+        /** {@code true} suppresses INTERNAL spans ({@code IO}), {@code false} is {@code FULL}. */
+        void setSuppress(boolean s) { this.policy = s ? TelemetryPolicy.IO : TelemetryPolicy.FULL; }
 
-        void setLevel(TelemetryLevel level) { this.level = level; }
+        void setPolicy(TelemetryPolicy policy) { this.policy = policy; }
     }
 
     /** A counting SpanProcessor to verify delegation. */
@@ -115,7 +115,7 @@ class FilteringSpanProcessorTest {
         public CompletableResultCode forceFlush() { return CompletableResultCode.ofSuccess(); }
     }
 
-    private TestTelemetryLevel telemetryLevel;
+    private TestPolicy policy;
     private SuppressedSpanRegistry registry;
     private InMemoryExporter inMemoryExporter;
     private ReparentingSpanExporter reparentingExporter;
@@ -129,12 +129,12 @@ class FilteringSpanProcessorTest {
     private void setUpPipeline(SuppressedSpanRegistry registry) {
         inMemoryExporter = new InMemoryExporter();
         this.registry = registry;
-        telemetryLevel = new TestTelemetryLevel();
+        policy = new TestPolicy();
         reparentingExporter = new ReparentingSpanExporter(inMemoryExporter, registry);
 
         SpanProcessor simpleProcessor = SimpleSpanProcessor.create(reparentingExporter);
         FilteringSpanProcessor filterProcessor =
-                new FilteringSpanProcessor(simpleProcessor, telemetryLevel, registry);
+                new FilteringSpanProcessor(simpleProcessor, policy, registry);
 
         tracerProvider = SdkTracerProvider.builder()
                 .addSpanProcessor(filterProcessor)
@@ -154,7 +154,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("exports all spans when suppression is inactive")
     void exportsAllWhenInactive() {
         setUpPipeline();
-        telemetryLevel.setSuppress(false);
+        policy.setSuppress(false);
 
         tracer.spanBuilder("server-span").setSpanKind(SpanKind.SERVER).startSpan().end();
         tracer.spanBuilder("client-span").setSpanKind(SpanKind.CLIENT).startSpan().end();
@@ -172,7 +172,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("drops INTERNAL spans when suppression is active")
     void dropsInternalWhenActive() {
         setUpPipeline();
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
 
         tracer.spanBuilder("server-span").setSpanKind(SpanKind.SERVER).startSpan().end();
         tracer.spanBuilder("client-span").setSpanKind(SpanKind.CLIENT).startSpan().end();
@@ -191,7 +191,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("children of suppressed INTERNAL spans are re-parented to grandparent")
     void childrenReparentedToGrandparent() {
         setUpPipeline();
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
 
         // Create: SERVER → INTERNAL (suppressed) → CLIENT (should be re-parented to SERVER)
         Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
@@ -232,7 +232,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("nested INTERNAL spans: child re-parented to nearest non-suppressed ancestor")
     void nestedInternalSpansReparented() {
         setUpPipeline();
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
 
         // Create: SERVER → INTERNAL_A (suppressed) → INTERNAL_B (suppressed) → CLIENT
         // CLIENT should be re-parented to SERVER
@@ -273,15 +273,15 @@ class FilteringSpanProcessorTest {
     void flagToggleTakesEffect() {
         setUpPipeline();
 
-        telemetryLevel.setSuppress(false);
+        policy.setSuppress(false);
         tracer.spanBuilder("internal-1").setSpanKind(SpanKind.INTERNAL).startSpan().end();
         assertEquals(1, inMemoryExporter.count());
 
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
         tracer.spanBuilder("internal-2").setSpanKind(SpanKind.INTERNAL).startSpan().end();
         assertEquals(1, inMemoryExporter.count());
 
-        telemetryLevel.setSuppress(false);
+        policy.setSuppress(false);
         tracer.spanBuilder("internal-3").setSpanKind(SpanKind.INTERNAL).startSpan().end();
         assertEquals(2, inMemoryExporter.count());
 
@@ -292,7 +292,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("all non-INTERNAL span kinds are exported when suppression is active")
     void allNonInternalKindsExported() {
         setUpPipeline();
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
 
         for (SpanKind kind : SpanKind.values()) {
             inMemoryExporter.clear();
@@ -315,7 +315,7 @@ class FilteringSpanProcessorTest {
     void isStartRequiredAlwaysTrue() {
         CountingProcessor delegate = new CountingProcessor();
         FilteringSpanProcessor processor =
-                new FilteringSpanProcessor(delegate, new TestTelemetryLevel(), new SuppressedSpanRegistry());
+                new FilteringSpanProcessor(delegate, new TestPolicy(), new SuppressedSpanRegistry());
         assertTrue(processor.isStartRequired());
     }
 
@@ -324,7 +324,7 @@ class FilteringSpanProcessorTest {
     void isEndRequiredAlwaysTrue() {
         CountingProcessor delegate = new CountingProcessor();
         FilteringSpanProcessor processor =
-                new FilteringSpanProcessor(delegate, new TestTelemetryLevel(), new SuppressedSpanRegistry());
+                new FilteringSpanProcessor(delegate, new TestPolicy(), new SuppressedSpanRegistry());
         assertTrue(processor.isEndRequired());
     }
 
@@ -333,7 +333,7 @@ class FilteringSpanProcessorTest {
     void shutdownDelegates() {
         CountingProcessor delegate = new CountingProcessor();
         FilteringSpanProcessor processor =
-                new FilteringSpanProcessor(delegate, new TestTelemetryLevel(), new SuppressedSpanRegistry());
+                new FilteringSpanProcessor(delegate, new TestPolicy(), new SuppressedSpanRegistry());
         assertTrue(processor.shutdown().isSuccess());
     }
 
@@ -342,7 +342,7 @@ class FilteringSpanProcessorTest {
     void forceFlushDelegates() {
         CountingProcessor delegate = new CountingProcessor();
         FilteringSpanProcessor processor =
-                new FilteringSpanProcessor(delegate, new TestTelemetryLevel(), new SuppressedSpanRegistry());
+                new FilteringSpanProcessor(delegate, new TestPolicy(), new SuppressedSpanRegistry());
         assertTrue(processor.forceFlush().isSuccess());
     }
 
@@ -351,7 +351,7 @@ class FilteringSpanProcessorTest {
     void reparentingExporterTransparentWhenEmpty() {
         setUpPipeline();
         // No suppression active → registry empty → exporter should passthrough
-        telemetryLevel.setSuppress(false);
+        policy.setSuppress(false);
         tracer.spanBuilder("server-span").setSpanKind(SpanKind.SERVER).startSpan().end();
 
         assertEquals(1, inMemoryExporter.count());
@@ -368,17 +368,17 @@ class FilteringSpanProcessorTest {
         // Suppressed when it starts, no longer suppressed when it ends. The
         // span must still be dropped: its children were already re-parented
         // past it, so exporting it now would contradict them.
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
         Span internal = tracer.spanBuilder("internal").setSpanKind(SpanKind.INTERNAL).startSpan();
-        telemetryLevel.setSuppress(false);
+        policy.setSuppress(false);
         internal.end();
 
         assertEquals(0, inMemoryExporter.count(), "span suppressed at start must stay suppressed");
 
         // And the reverse: started while visible, ended after the flag flipped.
-        telemetryLevel.setSuppress(false);
+        policy.setSuppress(false);
         Span visible = tracer.spanBuilder("visible").setSpanKind(SpanKind.INTERNAL).startSpan();
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
         visible.end();
 
         assertEquals(1, inMemoryExporter.count(), "span visible at start must stay visible");
@@ -391,7 +391,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("children of a suppressed root INTERNAL span become roots")
     void childrenOfSuppressedRootBecomeRoots() {
         setUpPipeline();
-        telemetryLevel.setSuppress(true);
+        policy.setSuppress(true);
 
         // INTERNAL (root, suppressed) → CLIENT. The client has no surviving
         // ancestor, so it must not keep pointing at a span nobody exported.
@@ -420,7 +420,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("OFF drops every span kind")
     void offDropsEveryKind() {
         setUpPipeline();
-        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
 
         for (SpanKind kind : SpanKind.values()) {
             tracer.spanBuilder("span-" + kind.name()).setSpanKind(kind).startSpan().end();
@@ -435,7 +435,7 @@ class FilteringSpanProcessorTest {
     @DisplayName("OFF drops a whole trace, root and children alike")
     void offDropsWholeTrace() {
         setUpPipeline();
-        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
 
         Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
         try (var s1 = server.makeCurrent()) {
@@ -457,11 +457,11 @@ class FilteringSpanProcessorTest {
     void offAndBackOn() {
         setUpPipeline();
 
-        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
         tracer.spanBuilder("dropped").setSpanKind(SpanKind.SERVER).startSpan().end();
         assertEquals(0, inMemoryExporter.count());
 
-        telemetryLevel.setLevel(TelemetryLevel.FULL);
+        policy.setPolicy(TelemetryPolicy.FULL);
         tracer.spanBuilder("kept").setSpanKind(SpanKind.SERVER).startSpan().end();
         assertEquals(1, inMemoryExporter.count());
         assertEquals("kept", inMemoryExporter.spans.get(0).getName());
@@ -475,15 +475,15 @@ class FilteringSpanProcessorTest {
         setUpPipeline();
 
         // Started while OFF, ended after tracing came back: stays dropped.
-        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
         Span dropped = tracer.spanBuilder("dropped").setSpanKind(SpanKind.SERVER).startSpan();
-        telemetryLevel.setLevel(TelemetryLevel.FULL);
+        policy.setPolicy(TelemetryPolicy.FULL);
         dropped.end();
         assertEquals(0, inMemoryExporter.count(), "span suppressed at start must stay suppressed");
 
         // Started while FULL, ended after the switch went OFF: stays exported.
         Span kept = tracer.spanBuilder("kept").setSpanKind(SpanKind.SERVER).startSpan();
-        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
         kept.end();
         assertEquals(1, inMemoryExporter.count(), "span visible at start must stay visible");
         assertEquals("kept", inMemoryExporter.spans.get(0).getName());
@@ -501,9 +501,9 @@ class FilteringSpanProcessorTest {
         // off the server, not off the span nobody exported.
         Span server = tracer.spanBuilder("server").setSpanKind(SpanKind.SERVER).startSpan();
         try (var s1 = server.makeCurrent()) {
-            telemetryLevel.setLevel(TelemetryLevel.OFF);
+            policy.setPolicy(TelemetryPolicy.DISABLED);
             Span internal = tracer.spanBuilder("internal").setSpanKind(SpanKind.INTERNAL).startSpan();
-            telemetryLevel.setLevel(TelemetryLevel.FULL);
+            policy.setPolicy(TelemetryPolicy.FULL);
             try (var s2 = internal.makeCurrent()) {
                 tracer.spanBuilder("client").setSpanKind(SpanKind.CLIENT).startSpan().end();
             }
@@ -530,7 +530,7 @@ class FilteringSpanProcessorTest {
     void longRunningSpanSurvivesRegistrySweeps() {
         // Tiny limits, so the 1000 spans below force dozens of sweeps.
         setUpPipeline(new SuppressedSpanRegistry(10, 10_000));
-        telemetryLevel.setLevel(TelemetryLevel.OFF);
+        policy.setPolicy(TelemetryPolicy.DISABLED);
 
         Span longRunning = tracer.spanBuilder("long-running").setSpanKind(SpanKind.SERVER).startSpan();
         for (int i = 0; i < 1000; i++) {

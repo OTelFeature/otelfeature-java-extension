@@ -34,10 +34,14 @@ needs a restart to change.
 Flip either flag in flagd and the change takes effect on the **very next span**
 — no restart, no redeploy, and no waiting for a poll interval.
 
-Both flags fail open. A value that is not `FULL`/`IO`/`OFF` (case-insensitive)
-reads as `FULL`; a missing flag, a value of the wrong type or a provider error
-reads as `FULL` / `true`. Only traces are affected: metrics and logs carry on
-regardless.
+Both flags fail open. Internally they are folded into one `TelemetryPolicy`
+(`enabled`, `suppressInternal`), and each field that cannot be resolved falls
+back to its **startup default**: what the stock agent would do without this
+extension. That means `enabled = true` (unless `OTEL_SDK_DISABLED` is set) and
+`suppressInternal = false`. So a value that is not `FULL`/`IO`/`OFF`
+(case-insensitive), a missing flag, a value of the wrong type or a provider
+error all read as `FULL` / `true`. The failure is logged once, not once per
+span. Only traces are affected: metrics and logs carry on regardless.
 
 > [!IMPORTANT]
 > **`OFF` is suppression, not an SDK disable.** In Java, spans are still
@@ -88,11 +92,11 @@ known and accepted:
 │  └──────────────┘   │ (this extension) │   └──────┬───────┘  │
 │                     └────────┬─────────┘          │          │
 │                              │                    ▼          │
-│                       ┌──────▼──────────────┐   ┌──────────────┐ │
-│                       │ FlagdTelemetryLevel │   │ SpanExporter │ │
-│                       │ OpenFeature SDK +   │   │ → OTLP to    │ │
-│                       │ flagd in-process    │   │   collector  │ │
-│                       └──────┬──────────────┘   └──────────────┘ │
+│                       ┌──────▼───────────────┐   ┌──────────────┐ │
+│                       │ FlagdTelemetryPolicy │   │ SpanExporter │ │
+│                       │ OpenFeature SDK +    │   │ → OTLP to    │ │
+│                       │ flagd in-process     │   │   collector  │ │
+│                       └──────┬───────────────┘   └──────────────┘ │
 │                              │ gRPC sync stream (flagd pushes) │
 │                              └────────────▶ flagd :8015           │
 └──────────────────────────────────────────────────────────────┘
@@ -106,17 +110,18 @@ At agent startup:
 2. It finds `OtelfeatureCustomizer` and calls `customize()`.
 3. The customizer wraps the auto-configured `SpanProcessor` with
    `FilteringSpanProcessor` via `addSpanProcessorCustomizer`.
-4. `FlagdTelemetryLevel` registers a [flagd](https://flagd.dev/)
+4. `FlagdTelemetryPolicy` registers a [flagd](https://flagd.dev/)
    [in-process](https://flagd.dev/reference/specifications/in-process-providers/)
    OpenFeature provider, which opens a gRPC **sync stream** to flagd (port
    8015). flagd pushes the whole flag ruleset down that stream and keeps it
    current, so evaluation is a local, in-memory operation. Registration is
    asynchronous — agent startup is not blocked on flagd being reachable, and
-   until the provider is ready the flag resolves to its default (suppress
-   nothing).
-5. On each span's `onStart()`, `FilteringSpanProcessor` asks for the current
-   level — `OFF` if `otelEnabled` is `false`, otherwise `telemetryLevel` — and,
-   if that level drops this span's kind, records the span in a registry;
+   until the provider is ready every policy field is its startup default
+   (suppress nothing).
+5. On each span's `onStart()`, `FilteringSpanProcessor` reads the current
+   `TelemetryPolicy` (not `enabled` if `otelEnabled` is `false` or
+   `telemetryLevel` is `OFF`; `suppressInternal` if it is `IO`) and, if the
+   policy drops this span's kind, records the span in a registry;
    `onEnd()` consults that registry and drops the span before it enters the
    batch queue. Everything else is passed through unchanged.
 

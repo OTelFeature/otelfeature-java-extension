@@ -16,6 +16,7 @@
 
 package io.otelfeature;
 
+import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.EvaluationContext;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.Reason;
@@ -26,9 +27,10 @@ import java.util.function.Function;
 import java.util.logging.Logger;
 
 /**
- * Decides how often a telemetry flag actually has to be evaluated.
+ * One telemetry flag: how often it actually has to be evaluated, and what it
+ * means when it cannot be.
  *
- * <p>The flags are asked about on every span, but most of the time the answer
+ * <p>The flag is asked about on every span, but most of the time the answer
  * cannot have changed since the last one: a flag with no {@code targeting}
  * block is one {@code defaultVariant} for the whole world. flagd says exactly
  * that, in the resolution reason:
@@ -48,68 +50,55 @@ import java.util.logging.Logger;
  * only {@code STATIC} - is kept, and every subsequent span is then answered
  * from an {@link AtomicReference} with no evaluation and no hook chain at all.
  * Any other reason means the value can depend on who is asking, so
- * {@link #level()} evaluates for every span.
+ * {@link #value()} evaluates for every span.
  *
  * <p>{@code classify} is driven by the provider's own events (see
- * {@link FlagdTelemetryLevel}), so attaching a {@code targeting} block to the
+ * {@link FlagdTelemetryPolicy}), so attaching a {@code targeting} block to the
  * flag makes the next classification report {@code TARGETING_MATCH}, caching
  * switches itself off, and spans start being evaluated individually. Remove the
  * targeting and caching resumes by itself.
  *
- * <p>The same rule serves both flags: {@code telemetryLevel} (a string variant,
- * see {@link #telemetryLevel}) and {@code otelEnabled} (a boolean kill switch,
- * see {@link #otelEnabled}). Each is turned into a {@link TelemetryLevel} by its
- * own interpretation, and {@link FlagdTelemetryLevel} combines the two.
+ * <p>A resolution that carries an error code, or no value, yields the
+ * {@code fallback} - the field's startup default - and is logged once per
+ * distinct error rather than once per span.
  *
  * @param <T> the flag's value type
+ * @param <R> what the flag means to the policy
  */
-final class TelemetryLevelResolver<T> implements TelemetryLevelSource {
+final class TelemetryFlag<T, R> {
 
-    private static final Logger log = Logger.getLogger(TelemetryLevelResolver.class.getName());
-
-    /** {@code telemetryLevel} when it cannot be resolved: show everything. */
-    static final String DEFAULT_VALUE = "FULL";
-
-    /** {@code otelEnabled} when it cannot be resolved: tracing stays on. */
-    static final Boolean DEFAULT_ENABLED = Boolean.TRUE;
+    private static final Logger log = Logger.getLogger(TelemetryFlag.class.getName());
 
     private final String flagKey;
     private final Function<EvaluationContext, FlagEvaluationDetails<T>> evaluate;
-    private final Function<T, TelemetryLevel> interpret;
+    private final Function<T, R> interpret;
+    private final R fallback;
 
     /**
      * The kept answer, or {@code null} for "not cacheable, evaluate per span".
      * Written by the provider's event thread, read by every span.
      */
-    private final AtomicReference<TelemetryLevel> cached = new AtomicReference<>();
+    private final AtomicReference<R> cached = new AtomicReference<>();
 
-    TelemetryLevelResolver(
+    /** The error last logged, so a failing flag is reported once, not per span. */
+    private final AtomicReference<ErrorCode> lastError = new AtomicReference<>();
+
+    /**
+     * @param flagKey the flag's key
+     * @param evaluate evaluates the flag for a context ({@code null} for none);
+     *     must not throw
+     * @param interpret what a successfully resolved, non-null value means
+     * @param fallback what the flag means when it cannot be resolved
+     */
+    TelemetryFlag(
             String flagKey,
             Function<EvaluationContext, FlagEvaluationDetails<T>> evaluate,
-            Function<T, TelemetryLevel> interpret) {
+            Function<T, R> interpret,
+            R fallback) {
         this.flagKey = flagKey;
         this.evaluate = evaluate;
         this.interpret = interpret;
-    }
-
-    /**
-     * A resolver for the {@code telemetryLevel} string flag: {@code FULL},
-     * {@code IO} or {@code OFF}, anything else read as {@code FULL}.
-     */
-    static TelemetryLevelResolver<String> telemetryLevel(
-            String flagKey, Function<EvaluationContext, FlagEvaluationDetails<String>> evaluate) {
-        return new TelemetryLevelResolver<>(flagKey, evaluate, TelemetryLevel::parse);
-    }
-
-    /**
-     * A resolver for the {@code otelEnabled} boolean flag: {@code false} is
-     * {@code OFF}, {@code true} (or no answer) is {@code FULL} - "not switched
-     * off", leaving the detail to {@code telemetryLevel}.
-     */
-    static TelemetryLevelResolver<Boolean> otelEnabled(
-            String flagKey, Function<EvaluationContext, FlagEvaluationDetails<Boolean>> evaluate) {
-        return new TelemetryLevelResolver<>(flagKey, evaluate,
-                enabled -> Boolean.FALSE.equals(enabled) ? TelemetryLevel.OFF : TelemetryLevel.FULL);
+        this.fallback = Objects.requireNonNull(fallback, "fallback");
     }
 
     /**
@@ -121,7 +110,7 @@ final class TelemetryLevelResolver<T> implements TelemetryLevelSource {
      * <p>{@code synchronized} because the SDK dispatches event handlers on a
      * thread pool: two events in quick succession could otherwise evaluate the
      * old and the new ruleset concurrently and write in the wrong order,
-     * leaving a stale answer - say {@code OFF} - cached until the next event.
+     * leaving a stale answer - say "disabled" - cached until the next event.
      * The span path never takes this lock.
      *
      * @param flagsChanged the keys the provider reported as changed, or
@@ -135,35 +124,69 @@ final class TelemetryLevelResolver<T> implements TelemetryLevelSource {
         }
 
         FlagEvaluationDetails<T> details = evaluate.apply(null);
+        R meaning = interpret(details);
 
         // Deliberately STATIC only. TARGETING_MATCH and DEFAULT both mean a
         // targeting block ran, so the answer belongs to one evaluation context
         // and not to the process; DISABLED and ERROR are not worth betting on.
-        TelemetryLevel decision = Reason.STATIC.name().equals(details.getReason())
-                ? interpret.apply(details.getValue())
-                : null;
+        R decision = Reason.STATIC.name().equals(details.getReason()) ? meaning : null;
 
-        TelemetryLevel previous = cached.getAndSet(decision);
+        R previous = cached.getAndSet(decision);
         if (!Objects.equals(previous, decision)) {
             if (decision == null) {
                 log.info("otelfeature-java-extension: " + flagKey + " resolves with reason="
                         + details.getReason() + " - evaluating per span");
             } else {
                 log.info("otelfeature-java-extension: " + flagKey + " is static (reason="
-                        + details.getReason() + ") - level " + decision
-                        + ", no further evaluation");
+                        + details.getReason() + ") - " + decision + ", no further evaluation");
             }
         }
     }
 
-    @Override
-    public TelemetryLevel level() {
-        TelemetryLevel decision = cached.get();
+    /**
+     * What the flag means for the next span: the kept answer if there is one,
+     * otherwise a fresh evaluation.
+     *
+     * @return never {@code null}
+     */
+    R value() {
+        R decision = cached.get();
         if (decision != null) {
             // The point of the whole exercise: a volatile read, and done.
             return decision;
         }
-        return interpret.apply(evaluate.apply(evaluationContext()).getValue());
+        return interpret(evaluate.apply(evaluationContext()));
+    }
+
+    private R interpret(FlagEvaluationDetails<T> details) {
+        ErrorCode error = details.getErrorCode();
+        if (error != null || Reason.ERROR.name().equals(details.getReason())) {
+            reportError(error == null ? ErrorCode.GENERAL : error, details.getErrorMessage());
+            return fallback;
+        }
+        if (lastError.getAndSet(null) != null) {
+            log.info("otelfeature-java-extension: " + flagKey + " resolves again");
+        }
+        if (Reason.DISABLED.name().equals(details.getReason())) {
+            // A flag switched off in flagd hands back the caller's default
+            // value; what that means is the startup default's business.
+            return fallback;
+        }
+        T value = details.getValue();
+        if (value == null) {
+            return fallback;
+        }
+        R meaning = interpret.apply(value);
+        return meaning != null ? meaning : fallback;
+    }
+
+    private void reportError(ErrorCode error, String message) {
+        if (lastError.getAndSet(error) != error) {
+            log.warning("otelfeature-java-extension: " + flagKey + " cannot be resolved (" + error
+                    + (message == null || message.isBlank() ? "" : ": " + message)
+                    + ") - using the startup default " + fallback
+                    + "; logged once until it resolves or the error changes");
+        }
     }
 
     /**
@@ -185,7 +208,7 @@ final class TelemetryLevelResolver<T> implements TelemetryLevelSource {
      *
      * @return the cached decision, or {@code null} if there isn't one
      */
-    TelemetryLevel cachedDecision() {
+    R cachedDecision() {
         return cached.get();
     }
 }

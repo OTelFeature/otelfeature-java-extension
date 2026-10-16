@@ -17,26 +17,26 @@
 package io.otelfeature;
 
 /**
- * Answers the one question {@link FilteringSpanProcessor} asks of the feature
- * flags: how much tracing is allowed right now?
+ * Answers the one question every enforcement point asks of the feature flags:
+ * what is the {@link TelemetryPolicy} right now?
  *
- * <p>Deliberately one method, and deliberately not tied to OpenFeature: the
- * span processor has no business knowing where the answer comes from, and a
- * test can supply one with a lambda.
+ * <p>Deliberately one method, and deliberately not tied to OpenFeature: an
+ * enforcement point has no business knowing where the answer comes from, and
+ * a test can supply one with a lambda.
  */
 @FunctionalInterface
-public interface TelemetryLevelSource {
+public interface TelemetryPolicySource {
 
     /**
-     * Returns the current telemetry level.
+     * Returns the current policy.
      *
      * <p>Called on the span hot path, from whatever thread created the span, so
-     * implementations must be thread-safe and cheap, and must fail open: an
-     * unresolvable flag means {@link TelemetryLevel#FULL}.
+     * implementations must be thread-safe, cheap and must never throw: a flag
+     * that cannot be resolved falls back to its startup default.
      *
-     * @return the level the next span is subject to
+     * @return the policy the next span is subject to
      */
-    TelemetryLevel level();
+    TelemetryPolicy policy();
 
     /** Releases whatever backs this source. The default does nothing. */
     default void shutdown() {}

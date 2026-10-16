@@ -16,27 +16,26 @@
 
 package io.otelfeature;
 
-import io.opentelemetry.api.trace.SpanKind;
-
 /**
- * How much tracing the flags currently allow.
+ * The variants of the {@code telemetryLevel} flag.
  *
- * <p>Ordered from most to least: {@code FULL} exports every span, {@code IO}
- * drops {@code INTERNAL} spans and keeps the edges ({@code SERVER},
- * {@code CLIENT}, ...), {@code OFF} drops every span. {@code OFF} is reached
- * either through the {@code telemetryLevel} variant of the same name or through
- * {@code otelEnabled=false}.
+ * <p>{@code FULL} exports every span, {@code IO} drops {@code INTERNAL} spans
+ * and keeps the edges ({@code SERVER}, {@code CLIENT}, ...), {@code OFF} drops
+ * every span. {@link FlagdTelemetryPolicy} folds the level into a
+ * {@link TelemetryPolicy}: {@code OFF} clears {@code enabled}, {@code IO} sets
+ * {@code suppressInternal}.
  */
-public enum TelemetryLevel {
+enum TelemetryLevel {
     FULL,
     IO,
     OFF;
 
     /**
-     * Reads a {@code telemetryLevel} variant value, failing open.
+     * Reads a {@code telemetryLevel} variant value.
      *
      * @param value the resolved flag value, case-insensitive
-     * @return the matching level, or {@link #FULL} for anything unrecognised
+     * @return the matching level, or {@code null} if the value is not one -
+     *     the caller then falls back to the startup default
      */
     static TelemetryLevel parse(String value) {
         if (value != null) {
@@ -46,20 +45,16 @@ public enum TelemetryLevel {
                 }
             }
         }
-        return FULL;
+        return null;
     }
 
     /**
-     * Whether a span of the given kind is dropped at this level.
+     * The level a policy amounts to, for the {@code telemetryLevel} fallback.
      *
-     * @param kind the span's kind
-     * @return {@code true} if the span should be suppressed
+     * @param policy the startup defaults
+     * @return {@code IO} if they suppress {@code INTERNAL} spans, else {@code FULL}
      */
-    boolean suppresses(SpanKind kind) {
-        return switch (this) {
-            case FULL -> false;
-            case IO -> kind == SpanKind.INTERNAL;
-            case OFF -> true;
-        };
+    static TelemetryLevel of(TelemetryPolicy policy) {
+        return policy.suppressInternal() ? IO : FULL;
     }
 }
