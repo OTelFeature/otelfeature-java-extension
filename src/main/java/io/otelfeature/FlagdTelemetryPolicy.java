@@ -393,6 +393,16 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         contexts.setResource(resource);
     }
 
+    /**
+     * Publishes the service's HTTP server error rate into the evaluation
+     * context ({@code otelfeature.http.server.error_rate}), or removes it.
+     *
+     * @param rate the last interval's error rate, or {@code null}
+     */
+    void setErrorRate(Double rate) {
+        contexts.setErrorRate(rate);
+    }
+
     /** Builds a span's evaluation context the first time a flag asks for it. */
     private static final class LazyContext implements Supplier<EvaluationContext> {
         private final EvaluationContextFactory factory;

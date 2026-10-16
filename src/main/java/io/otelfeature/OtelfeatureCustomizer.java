@@ -18,6 +18,7 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
@@ -96,6 +97,14 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
                 "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
                         + " (" + Enforcement.ENV + ")");
 
+        // The service's HTTP error rate, from its own request-duration metric,
+        // for rules like "error_rate > 0.05 -> traceSampleRatio 1.0".
+        ErrorRateReader errorRate = new ErrorRateReader(policy::setErrorRate,
+                envDuration("OTELFEATURE_ERROR_RATE_INTERVAL", Duration.ofSeconds(10)),
+                envLong("OTELFEATURE_ERROR_RATE_MIN_REQUESTS", 10));
+        autoConfiguration.addMeterProviderCustomizer(
+                (meterProvider, config) -> meterProvider.registerMetricReader(errorRate));
+
         // The resource is the process-wide part of every evaluation context.
         autoConfiguration.addResourceCustomizer((resource, config) -> {
             policy.setResource(resource);
@@ -124,6 +133,56 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
         // rather than leaving the sync stream to be torn down by the JVM.
         Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
                 "otelfeature-shutdown"));
+    }
+
+    /**
+     * A duration from the environment: {@code 500ms}, {@code 10s}, {@code 1m},
+     * or a plain number of seconds.
+     */
+    static Duration envDuration(String name, Duration fallback) {
+        return parseDuration(System.getenv(name), fallback, name);
+    }
+
+    static Duration parseDuration(String value, Duration fallback, String name) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        String v = value.trim().toLowerCase(java.util.Locale.ROOT);
+        try {
+            Duration parsed;
+            if (v.endsWith("ms")) {
+                parsed = Duration.ofMillis(Long.parseLong(v.substring(0, v.length() - 2).trim()));
+            } else if (v.endsWith("s")) {
+                parsed = Duration.ofSeconds(Long.parseLong(v.substring(0, v.length() - 1).trim()));
+            } else if (v.endsWith("m")) {
+                parsed = Duration.ofMinutes(Long.parseLong(v.substring(0, v.length() - 1).trim()));
+            } else {
+                parsed = Duration.ofSeconds(Long.parseLong(v));
+            }
+            if (parsed.isNegative() || parsed.isZero()) {
+                throw new NumberFormatException("not positive");
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a duration, using "
+                    + fallback.toSeconds() + "s");
+            return fallback;
+        }
+    }
+
+    static long envLong(String name, long fallback) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            long parsed = Long.parseLong(value.trim());
+            return parsed < 0 ? fallback : parsed;
+        } catch (NumberFormatException e) {
+            log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a number, using "
+                    + fallback);
+            return fallback;
+        }
     }
 
     /**

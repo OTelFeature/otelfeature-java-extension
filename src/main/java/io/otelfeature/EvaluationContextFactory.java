@@ -51,6 +51,8 @@ import java.util.logging.Logger;
  *       {@code span.name}, and every attribute set at start - {@code url.path},
  *       {@code http.request.method}, {@code server.address},
  *       {@code db.system.name}, {@code db.operation.name}, {@code rpc.service}, ...</td></tr>
+ *   <tr><td>the service's HTTP metrics</td><td>{@code otelfeature.http.server.error_rate}
+ *       (see {@link ErrorRateReader}), when the last interval had enough requests</td></tr>
  *   <tr><td>{@code targetingKey}</td><td>the trace id (hex), so flagd's
  *       {@code fractional} buckets a whole trace the same way in every service</td></tr>
  * </table>
@@ -88,6 +90,22 @@ final class EvaluationContextFactory {
     }
 
     private volatile Base base = Base.EMPTY;
+
+    /** The context key the service's HTTP error rate is published under. */
+    static final String ERROR_RATE_KEY = "otelfeature.http.server.error_rate";
+
+    /** The last interval's HTTP server error rate, or {@code null} for none. */
+    private volatile Double errorRate;
+
+    /**
+     * Publishes the service's HTTP server error rate into every context built
+     * from now on, or removes it ({@code null}).
+     *
+     * @param rate errors / requests over the last interval, or {@code null}
+     */
+    void setErrorRate(Double rate) {
+        this.errorRate = rate;
+    }
 
     /** How many contexts have been built. For tests; uncontended on the span path. */
     private final LongAdder builds = new LongAdder();
@@ -155,6 +173,10 @@ final class EvaluationContextFactory {
         }
         if (span.name() != null) {
             insert(tree, "span.name", span.name());
+        }
+        Double rate = errorRate;
+        if (rate != null) {
+            insert(tree, ERROR_RATE_KEY, rate);
         }
 
         Map<String, Value> values = new HashMap<>(b.values());

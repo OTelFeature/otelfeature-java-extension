@@ -227,4 +227,18 @@ class EvaluationContextFactoryTest {
                 () -> ((dev.openfeature.sdk.MutableStructure) service.asStructure()).add("name", "hijacked"));
         assertEquals("weather", at(factory.build(serverSpan(Attributes.empty())), "service.name").asString());
     }
+
+    @Test
+    @DisplayName("the error rate is in the context while published, and gone once withdrawn")
+    void errorRateKey() {
+        EvaluationContextFactory factory = factory();
+        assertNull(factory.build(serverSpan(Attributes.empty())).getValue("otelfeature"));
+
+        factory.setErrorRate(0.07);
+        assertEquals(0.07, at(factory.build(serverSpan(Attributes.empty())),
+                "otelfeature.http.server.error_rate").asDouble());
+
+        factory.setErrorRate(null);
+        assertNull(factory.build(serverSpan(Attributes.empty())).getValue("otelfeature"));
+    }
 }

@@ -380,6 +380,45 @@ like a query over your telemetry:
 }
 ```
 
+#### The service's error rate: `otelfeature.http.server.error_rate`
+
+One key isn't an OpenTelemetry attribute but comes from the service's own
+metrics: the share of HTTP server requests that failed in the last interval.
+It is the input to a control loop that lives entirely in a flagd rule, with no
+outside script and no new metric:
+
+```json
+"traceSampleRatio": {
+  "state": "ENABLED", "defaultVariant": "tenth",
+  "variants": { "tenth": 0.1, "all": 1.0 },
+  "targeting": { "if": [
+    { ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }, "all", null ] }
+}
+```
+
+- **Source.** The Java agent's HTTP server instrumentation already records
+  `http.server.request.duration` and sets `error.type` on failed requests
+  (stable HTTP semconv, the default since agent 2.0). The extension adds one
+  extra, in-process metric reader with **delta** temporality next to the OTLP
+  one. Each collection is then exactly one interval:
+  `error_rate = requests with error.type / all requests`, with no window or
+  smoothing. A point without `error.type` but with
+  `http.response.status_code >= 500` also counts as an error.
+- **Metrics, not spans.** A sampled-out span never records a status, but the
+  histogram is recorded whatever the sampling does, so turning sampling *down*
+  doesn't blind the loop.
+- **Unchanged export.** The extra reader has its own delta storage. What the
+  OTLP reader exports, cumulative or not, is unaffected (tested).
+- **`OTELFEATURE_ERROR_RATE_INTERVAL`** (default `10s`; accepts `500ms`, `10s`,
+  `1m`, or plain seconds) sets how often it is collected.
+- **`OTELFEATURE_ERROR_RATE_MIN_REQUESTS`** (default `10`). An interval with
+  fewer requests publishes **no** rate, and the key is left out of the
+  context: 1 failure in 2 requests is not a 50% error rate worth acting on.
+  A rule then sees the key as missing, and `>` against a missing `var` is
+  false.
+- The rate is per service (per process, in fact), which matches "turns
+  sampling up *for that service*".
+
 **Shape.** Keys are nested by dot segment: `service.name` is sent as
 `{"service": {"name": "weather"}}`, because JsonLogic's `var` splits on dots in
 every flagd evaluator (see
@@ -452,6 +491,8 @@ java -javaagent:opentelemetry-javaagent.jar -jar your-app.jar
 | `OTELFEATURE_ENABLED_FLAG_NAME`       | `otelEnabled`    | flagd key of the boolean kill switch            |
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME`   | `recordSpan`     | flagd key of the per-span boolean               |
 | `OTELFEATURE_SAMPLE_RATIO_FLAG_NAME`  | `traceSampleRatio` | flagd key of the sampling ratio (`0.0`–`1.0`) |
+| `OTELFEATURE_ERROR_RATE_INTERVAL`     | `10s`            | how often `otelfeature.http.server.error_rate` is computed |
+| `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10`             | fewest requests per interval for an error rate  |
 | `OTELFEATURE_ENFORCEMENT`             | `processor`      | `processor` or `sampler`, see [Enforcement](#enforcement-processor-or-sampler) |
 
 > [!IMPORTANT]
