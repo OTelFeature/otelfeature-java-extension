@@ -17,6 +17,7 @@
 package io.otelfeature;
 
 import io.opentelemetry.api.trace.SpanKind;
+import java.util.Locale;
 import java.util.function.Function;
 
 /**
@@ -96,7 +97,7 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal) {
      */
     static TelemetryPolicy startupDefaults() {
         return startupDefaults(name -> {
-            String property = System.getProperty(name.toLowerCase().replace('_', '.'));
+            String property = System.getProperty(name.toLowerCase(Locale.ROOT).replace('_', '.'));
             return property != null ? property : System.getenv(name);
         });
     }

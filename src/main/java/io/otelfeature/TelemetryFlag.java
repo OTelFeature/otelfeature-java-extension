@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -58,9 +59,12 @@ import java.util.logging.Logger;
  * switches itself off, and spans start being evaluated individually. Remove the
  * targeting and caching resumes by itself.
  *
- * <p>A resolution that carries an error code, or no value, yields the
- * {@code fallback} - the field's startup default - and is logged once per
- * distinct error rather than once per span.
+ * <p>A resolution that carries an error code, no value, or a value the flag
+ * cannot interpret yields the {@code fallback} - the field's startup default -
+ * and is logged once per transition into that problem rather than once per
+ * span. A flag that flaps between two states logs each flip; racing threads
+ * may occasionally log the same transition twice. "Provider not ready", which
+ * every startup passes through, is logged at FINE.
  *
  * @param <T> the flag's value type
  * @param <R> what the flag means to the policy
@@ -80,8 +84,17 @@ final class TelemetryFlag<T, R> {
      */
     private final AtomicReference<R> cached = new AtomicReference<>();
 
-    /** The error last logged, so a failing flag is reported once, not per span. */
-    private final AtomicReference<ErrorCode> lastError = new AtomicReference<>();
+    /** Marker for a resolution that came back without a value. */
+    private static final String NO_VALUE = "NO_VALUE";
+
+    /** Marker for a value the flag does not recognise, e.g. an unknown variant. */
+    private static final String UNRECOGNISED_VALUE = "UNRECOGNISED_VALUE";
+
+    /**
+     * The problem last logged ({@link ErrorCode} name or one of the markers
+     * above), so a failing flag is reported once, not per span.
+     */
+    private final AtomicReference<String> lastProblem = new AtomicReference<>();
 
     /**
      * @param flagKey the flag's key
@@ -161,32 +174,57 @@ final class TelemetryFlag<T, R> {
     private R interpret(FlagEvaluationDetails<T> details) {
         ErrorCode error = details.getErrorCode();
         if (error != null || Reason.ERROR.name().equals(details.getReason())) {
-            reportError(error == null ? ErrorCode.GENERAL : error, details.getErrorMessage());
+            String code = (error == null ? ErrorCode.GENERAL : error).name();
+            report(code, details.getErrorMessage(), error == ErrorCode.PROVIDER_NOT_READY);
             return fallback;
-        }
-        if (lastError.getAndSet(null) != null) {
-            log.info("otelfeature-java-extension: " + flagKey + " resolves again");
         }
         if (Reason.DISABLED.name().equals(details.getReason())) {
             // A flag switched off in flagd hands back the caller's default
             // value; what that means is the startup default's business.
+            resolved();
             return fallback;
         }
         T value = details.getValue();
         if (value == null) {
+            report(NO_VALUE, null, false);
             return fallback;
         }
         R meaning = interpret.apply(value);
-        return meaning != null ? meaning : fallback;
+        if (meaning == null) {
+            report(UNRECOGNISED_VALUE, "'" + value + "'", false);
+            return fallback;
+        }
+        resolved();
+        return meaning;
     }
 
-    private void reportError(ErrorCode error, String message) {
-        if (lastError.getAndSet(error) != error) {
-            log.warning("otelfeature-java-extension: " + flagKey + " cannot be resolved (" + error
-                    + (message == null || message.isBlank() ? "" : ": " + message)
-                    + ") - using the startup default " + fallback
-                    + "; logged once until it resolves or the error changes");
+    /** Marks the flag healthy again, logging the recovery if it was not. */
+    private void resolved() {
+        // Read first: on a healthy, targeted flag this runs on every span, and
+        // an unconditional getAndSet would be a contended write each time.
+        if (lastProblem.get() != null && lastProblem.getAndSet(null) != null) {
+            log.info("otelfeature-java-extension: " + flagKey + " resolves again");
         }
+    }
+
+    /**
+     * Logs a problem the first time it is seen - once per transition into it,
+     * not once per span.
+     *
+     * @param problem an {@link ErrorCode} name, or one of our own markers
+     * @param detail extra context for the message, or {@code null}
+     * @param quietly {@code true} for the expected startup race
+     *     (provider not ready yet), logged at FINE instead of WARNING
+     */
+    private void report(String problem, String detail, boolean quietly) {
+        if (problem.equals(lastProblem.get()) || problem.equals(lastProblem.getAndSet(problem))) {
+            return;
+        }
+        String message = "otelfeature-java-extension: " + flagKey + " cannot be used (" + problem
+                + (detail == null || detail.isBlank() ? "" : ": " + detail)
+                + ") - using the startup default " + fallback
+                + "; logged once until it resolves or the problem changes";
+        log.log(quietly ? Level.FINE : Level.WARNING, message);
     }
 
     /**

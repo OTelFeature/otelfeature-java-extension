@@ -129,10 +129,14 @@ class FlagdTelemetryPolicyIntegrationTest {
         flagFile = tempDir.resolve("flags.json");
         write(staticFlags("full"));
 
-        telemetryLevel = new FlagdTelemetryPolicy(
+        telemetryLevel = policyWithDefaults(TelemetryPolicy.FULL);
+    }
+
+    private FlagdTelemetryPolicy policyWithDefaults(TelemetryPolicy defaults) {
+        return new FlagdTelemetryPolicy(
                 FLAG_KEY,
                 ENABLED_KEY,
-                TelemetryPolicy.FULL,
+                defaults,
                 FlagdOptions.builder()
                         .resolverType(Config.Resolver.FILE)
                         .offlineFlagSourcePath(flagFile.toString())
@@ -276,6 +280,35 @@ class FlagdTelemetryPolicyIntegrationTest {
                         && telemetryLevel.cachedEnabled() == null),
                 "a missing otelEnabled should stay uncached");
         assertEquals(TelemetryPolicy.IO, telemetryLevel.policy());
+    }
+
+    @Test
+    @DisplayName("each field falls back to its own startup default; flags override the floor")
+    void fieldsFallBackToStartupDefaults() throws IOException {
+        telemetryLevel.shutdown();
+        // otelEnabled=true, telemetryLevel missing, startup defaults "disabled".
+        write("""
+                {
+                  "$schema": "https://flagd.dev/schema/v0/flags.json",
+                  "flags": {
+                    "otelEnabled": {
+                      "state": "ENABLED",
+                      "defaultVariant": "on",
+                      "variants": { "on": true, "off": false }
+                    }
+                  }
+                }
+                """);
+        telemetryLevel = policyWithDefaults(TelemetryPolicy.DISABLED);
+
+        assertTrue(waitFor(() -> Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
+                "provider never classified otelEnabled");
+        assertEquals(TelemetryPolicy.DISABLED, telemetryLevel.policy(),
+                "the missing telemetryLevel keeps its share of the 'disabled' floor");
+
+        write(staticFlags("full", "on"));
+        assertTrue(waitFor(() -> telemetryLevel.policy() == TelemetryPolicy.FULL),
+                "once both flags say so, they override the floor");
     }
 
     private void write(String json) throws IOException {

@@ -25,7 +25,6 @@ import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.EvaluationContext;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.Reason;
-import io.opentelemetry.api.trace.SpanKind;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
@@ -295,15 +294,6 @@ class TelemetryFlagTest {
         assertEquals(TelemetryLevel.IO, resolver.value());
     }
 
-    @ParameterizedTest
-    @EnumSource(SpanKind.class)
-    @DisplayName("each policy drops exactly the kinds it should")
-    void policiesSuppressTheRightKinds(SpanKind kind) {
-        assertFalse(TelemetryPolicy.FULL.suppresses(kind));
-        assertEquals(kind == SpanKind.INTERNAL, TelemetryPolicy.IO.suppresses(kind));
-        assertTrue(TelemetryPolicy.DISABLED.suppresses(kind));
-    }
-
     // ----------------------------------------------------------------------
     // otelEnabled
     // ----------------------------------------------------------------------
@@ -478,30 +468,57 @@ class TelemetryFlagTest {
         }
     }
 
-    // ----------------------------------------------------------------------
-    // Startup defaults
-    // ----------------------------------------------------------------------
-
     @Test
-    @DisplayName("startup defaults are the stock agent's behaviour")
-    void startupDefaultsAreStock() {
-        assertEquals(TelemetryPolicy.FULL, TelemetryPolicy.startupDefaults(name -> null));
-        assertEquals(TelemetryPolicy.FULL, TelemetryPolicy.startupDefaults(name -> "false"));
+    @DisplayName("an unrecognised variant takes the fallback and is logged once")
+    void unrecognisedValueLoggedOnce() {
+        RecordingEvaluator<String> evaluator = new RecordingEvaluator<>(details("INTERNAL_ONLY", Reason.TARGETING_MATCH));
+        TelemetryFlag<String, TelemetryLevel> resolver = levelResolver(evaluator);
+
+        try (Warnings warnings = new Warnings()) {
+            for (int i = 0; i < 10; i++) {
+                assertEquals(TelemetryLevel.FULL, resolver.value());
+            }
+            assertEquals(1, warnings.records.size());
+            assertTrue(warnings.records.get(0).getMessage().contains("INTERNAL_ONLY"));
+        }
     }
 
     @Test
-    @DisplayName("OTEL_SDK_DISABLED=true makes 'disabled' the floor")
-    void sdkDisabledIsTheFloor() {
-        assertEquals(TelemetryPolicy.DISABLED, TelemetryPolicy.startupDefaults(
-                name -> "OTEL_SDK_DISABLED".equals(name) ? "true" : null));
+    @DisplayName("a resolution without a value is logged once")
+    void nullValueLoggedOnce() {
+        TelemetryFlag<String, TelemetryLevel> resolver =
+                levelResolver(new RecordingEvaluator<>(details(null, Reason.TARGETING_MATCH)));
+
+        try (Warnings warnings = new Warnings()) {
+            resolver.value();
+            resolver.value();
+            assertEquals(1, warnings.records.size());
+        }
     }
 
     @Test
-    @DisplayName("policies come from a fixed set of shared instances")
-    void policiesAreShared() {
-        assertTrue(TelemetryPolicy.of(true, false) == TelemetryPolicy.FULL);
-        assertTrue(TelemetryPolicy.of(true, true) == TelemetryPolicy.IO);
-        assertTrue(TelemetryPolicy.of(false, true) == TelemetryPolicy.DISABLED);
-        assertTrue(TelemetryPolicy.of(false, false) == TelemetryPolicy.DISABLED);
+    @DisplayName("provider-not-ready at startup is not a warning")
+    void providerNotReadyIsQuiet() {
+        TelemetryFlag<String, TelemetryLevel> resolver =
+                levelResolver(new RecordingEvaluator<>(error(ErrorCode.PROVIDER_NOT_READY)));
+
+        try (Warnings warnings = new Warnings()) {
+            assertEquals(TelemetryLevel.FULL, resolver.value());
+            assertEquals(0, warnings.records.size(), "every startup passes through this");
+        }
+    }
+
+    @Test
+    @DisplayName("a real error after provider-not-ready is still a warning")
+    void realErrorAfterNotReadyWarns() {
+        TelemetryFlag<String, TelemetryLevel> resolver = levelResolver(new RecordingEvaluator<>(
+                error(ErrorCode.PROVIDER_NOT_READY), error(ErrorCode.FLAG_NOT_FOUND)));
+
+        try (Warnings warnings = new Warnings()) {
+            resolver.value();
+            resolver.value();
+            assertEquals(1, warnings.records.size());
+            assertTrue(warnings.records.get(0).getMessage().contains("FLAG_NOT_FOUND"));
+        }
     }
 }

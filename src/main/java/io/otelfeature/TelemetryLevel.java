@@ -52,9 +52,13 @@ enum TelemetryLevel {
      * The level a policy amounts to, for the {@code telemetryLevel} fallback.
      *
      * @param policy the startup defaults
-     * @return {@code IO} if they suppress {@code INTERNAL} spans, else {@code FULL}
+     * @return {@code OFF} if they are not enabled, {@code IO} if they suppress
+     *     {@code INTERNAL} spans, else {@code FULL}
      */
     static TelemetryLevel of(TelemetryPolicy policy) {
+        if (!policy.enabled()) {
+            return OFF;
+        }
         return policy.suppressInternal() ? IO : FULL;
     }
 }

@@ -54,8 +54,8 @@ import io.opentelemetry.sdk.trace.SpanProcessor;
  * OTelFeature/otelfeature-java-extension#21.
  *
  * <p>When suppression is inactive, all spans are passed through unchanged with
- * minimal overhead: for static flags that is two volatile reads and an enum
- * switch per span, with no flag evaluation at all - see
+ * minimal overhead: for static flags that is two volatile reads and a boolean
+ * check per span, with no flag evaluation at all - see
  * {@link TelemetryFlag}.
  */
 public class FilteringSpanProcessor implements SpanProcessor {
