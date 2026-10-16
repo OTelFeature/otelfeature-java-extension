@@ -50,10 +50,21 @@ import org.junit.jupiter.api.io.TempDir;
 class FlagdTelemetryLevelIntegrationTest {
 
     private static final String FLAG_KEY = "telemetryLevel";
+    private static final String ENABLED_KEY = "otelEnabled";
     private static final long TIMEOUT_MILLIS = 15_000;
 
-    /** No targeting: flagd resolves this with reason STATIC. */
+    /** No targeting on either flag: flagd resolves both with reason STATIC. */
     private static String staticFlags(String defaultVariant) {
+        return staticFlags(defaultVariant, "on");
+    }
+
+    /**
+     * Both flags, untargeted.
+     *
+     * @param levelVariant {@code full}, {@code io} or {@code off}
+     * @param enabledVariant {@code on} or {@code off}
+     */
+    private static String staticFlags(String levelVariant, String enabledVariant) {
         return """
                 {
                   "$schema": "https://flagd.dev/schema/v0/flags.json",
@@ -61,12 +72,17 @@ class FlagdTelemetryLevelIntegrationTest {
                     "telemetryLevel": {
                       "state": "ENABLED",
                       "defaultVariant": "%s",
-                      "variants": { "io": "IO", "full": "FULL" }
+                      "variants": { "io": "IO", "full": "FULL", "off": "OFF" }
+                    },
+                    "otelEnabled": {
+                      "state": "ENABLED",
+                      "defaultVariant": "%s",
+                      "variants": { "on": true, "off": false }
                     }
                   }
                 }
                 """
-                .formatted(defaultVariant);
+                .formatted(levelVariant, enabledVariant);
     }
 
     /**
@@ -80,6 +96,11 @@ class FlagdTelemetryLevelIntegrationTest {
                 {
                   "$schema": "https://flagd.dev/schema/v0/flags.json",
                   "flags": {
+                    "otelEnabled": {
+                      "state": "ENABLED",
+                      "defaultVariant": "on",
+                      "variants": { "on": true, "off": false }
+                    },
                     "telemetryLevel": {
                       "state": "ENABLED",
                       "defaultVariant": "full",
@@ -110,6 +131,7 @@ class FlagdTelemetryLevelIntegrationTest {
 
         telemetryLevel = new FlagdTelemetryLevel(
                 FLAG_KEY,
+                ENABLED_KEY,
                 FlagdOptions.builder()
                         .resolverType(Config.Resolver.FILE)
                         .offlineFlagSourcePath(flagFile.toString())
@@ -129,34 +151,34 @@ class FlagdTelemetryLevelIntegrationTest {
     @Test
     @DisplayName("an untargeted flag is classified static and answered without evaluating")
     void untargetedFlagIsClassifiedStatic() {
-        assertTrue(waitFor(() -> telemetryLevel.cachedDecision() != null),
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() != null),
                 "provider never classified the flag");
 
-        assertEquals(Boolean.FALSE, telemetryLevel.cachedDecision());
-        assertFalse(telemetryLevel.shouldSuppressInternal());
+        assertEquals(TelemetryLevel.FULL, telemetryLevel.cachedLevel());
+        assertEquals(TelemetryLevel.FULL, telemetryLevel.level());
     }
 
     @Test
     @DisplayName("editing the flag takes effect, driven by the configuration-change event")
     void editingTheFlagTakesEffect() throws IOException {
-        assertTrue(waitFor(() -> Boolean.FALSE.equals(telemetryLevel.cachedDecision())));
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL));
 
         write(staticFlags("io"));
 
-        assertTrue(waitFor(telemetryLevel::shouldSuppressInternal),
+        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.IO),
                 "flag edit never reached the extension");
-        assertEquals(Boolean.TRUE, telemetryLevel.cachedDecision(),
+        assertEquals(TelemetryLevel.IO, telemetryLevel.cachedLevel(),
                 "an untargeted flag should still be answered from the kept decision");
     }
 
     @Test
     @DisplayName("attaching targeting switches caching off; removing it switches caching back on")
     void targetingSwitchesCachingOffAndBackOn() throws IOException {
-        assertTrue(waitFor(() -> telemetryLevel.cachedDecision() != null),
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() != null),
                 "provider never classified the flag");
 
         write(targetedFlags());
-        assertTrue(waitFor(() -> telemetryLevel.cachedDecision() == null),
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == null),
                 "a targeted flag must be evaluated per span, not cached");
 
         // And it really does resolve per evaluation now: the rule flips on the
@@ -167,7 +189,7 @@ class FlagdTelemetryLevelIntegrationTest {
 
             @Override
             public boolean getAsBoolean() {
-                if (telemetryLevel.shouldSuppressInternal()) {
+                if (telemetryLevel.level() == TelemetryLevel.IO) {
                     sawSuppressed = true;
                 } else {
                     sawVisible = true;
@@ -177,9 +199,9 @@ class FlagdTelemetryLevelIntegrationTest {
         }), "targeted flag never varied between evaluations");
 
         write(staticFlags("full"));
-        assertTrue(waitFor(() -> telemetryLevel.cachedDecision() != null),
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() != null),
                 "caching did not resume once the targeting was removed");
-        assertEquals(Boolean.FALSE, telemetryLevel.cachedDecision());
+        assertEquals(TelemetryLevel.FULL, telemetryLevel.cachedLevel());
     }
 
     @Test
@@ -191,10 +213,68 @@ class FlagdTelemetryLevelIntegrationTest {
 
         assertTrue(waitFor(() -> {
             // ERROR is not a cacheable reason: the flag may yet appear.
-            return telemetryLevel.cachedDecision() == null && !telemetryLevel.shouldSuppressInternal();
-        }), "a missing flag should resolve to its default and stay uncached");
+            return telemetryLevel.cachedLevel() == null && telemetryLevel.cachedEnabled() == null
+                    && telemetryLevel.level() == TelemetryLevel.FULL;
+        }), "missing flags should resolve to their defaults and stay uncached");
 
-        assertNull(telemetryLevel.cachedDecision());
+        assertNull(telemetryLevel.cachedLevel());
+        assertNull(telemetryLevel.cachedEnabled());
+    }
+
+    @Test
+    @DisplayName("telemetryLevel=OFF is served from the kept decision and switches back")
+    void offVariantTakesEffect() throws IOException {
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL));
+
+        write(staticFlags("off"));
+        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.OFF),
+                "OFF never reached the extension");
+        assertEquals(TelemetryLevel.OFF, telemetryLevel.cachedLevel());
+
+        write(staticFlags("full"));
+        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.FULL),
+                "switching back to FULL never reached the extension");
+    }
+
+    @Test
+    @DisplayName("otelEnabled=false is OFF whatever telemetryLevel says, and flips back")
+    void otelEnabledFalseIsOff() throws IOException {
+        assertTrue(waitFor(() -> telemetryLevel.cachedEnabled() == TelemetryLevel.FULL),
+                "provider never classified otelEnabled");
+
+        write(staticFlags("full", "off"));
+        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.OFF),
+                "otelEnabled=false never reached the extension");
+        assertEquals(TelemetryLevel.OFF, telemetryLevel.cachedEnabled(),
+                "an untargeted otelEnabled should be answered from the kept decision");
+        assertEquals(TelemetryLevel.FULL, telemetryLevel.cachedLevel(),
+                "telemetryLevel itself is untouched");
+
+        write(staticFlags("io", "on"));
+        assertTrue(waitFor(() -> telemetryLevel.level() == TelemetryLevel.IO),
+                "with the kill switch back on, telemetryLevel decides again");
+    }
+
+    @Test
+    @DisplayName("a flag file without otelEnabled leaves tracing on")
+    void missingOtelEnabledFailsOpen() throws IOException {
+        write("""
+                {
+                  "$schema": "https://flagd.dev/schema/v0/flags.json",
+                  "flags": {
+                    "telemetryLevel": {
+                      "state": "ENABLED",
+                      "defaultVariant": "io",
+                      "variants": { "io": "IO", "full": "FULL" }
+                    }
+                  }
+                }
+                """);
+
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO
+                        && telemetryLevel.cachedEnabled() == null),
+                "a missing otelEnabled should stay uncached");
+        assertEquals(TelemetryLevel.IO, telemetryLevel.level());
     }
 
     private void write(String json) throws IOException {

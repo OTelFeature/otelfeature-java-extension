@@ -17,7 +17,6 @@
 package io.otelfeature;
 
 import io.opentelemetry.api.trace.SpanContext;
-import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.trace.ReadWriteSpan;
@@ -25,8 +24,11 @@ import io.opentelemetry.sdk.trace.ReadableSpan;
 import io.opentelemetry.sdk.trace.SpanProcessor;
 
 /**
- * Wraps a delegate {@link SpanProcessor} and drops {@code INTERNAL} spans when
- * suppression is active (flagd {@code telemetryLevel} flag set to {@code "IO"}).
+ * Wraps a delegate {@link SpanProcessor} and drops the spans the current
+ * {@link TelemetryLevel} does not allow: {@code INTERNAL} spans at {@code IO}
+ * (flagd {@code telemetryLevel} set to {@code "IO"}), every span at {@code OFF}
+ * ({@code telemetryLevel} set to {@code "OFF"}, or {@code otelEnabled} set to
+ * {@code false}).
  *
  * <p>Filtering at the {@link SpanProcessor} level means dropped spans never enter
  * the {@code BatchSpanProcessor} queue, saving memory and CPU compared to
@@ -46,9 +48,14 @@ import io.opentelemetry.sdk.trace.SpanProcessor;
  * (or the reverse) would corrupt the parent chain. Asking once also halves the
  * evaluations.
  *
+ * <p>{@code OFF} is suppression, not an SDK disable: spans are still created,
+ * populated and propagated, then dropped here. It saves batching and export,
+ * not the instrumentation's own CPU. Dropping at the sampler instead is
+ * OTelFeature/otelfeature-java-extension#21.
+ *
  * <p>When suppression is inactive, all spans are passed through unchanged with
- * minimal overhead: for a static flag that is one volatile read and one enum
- * comparison per span, with no flag evaluation at all - see
+ * minimal overhead: for static flags that is two volatile reads and an enum
+ * switch per span, with no flag evaluation at all - see
  * {@link TelemetryLevelResolver}.
  */
 public class FilteringSpanProcessor implements SpanProcessor {
@@ -66,7 +73,7 @@ public class FilteringSpanProcessor implements SpanProcessor {
 
     @Override
     public void onStart(Context parentContext, ReadWriteSpan span) {
-        // Record suppressed INTERNAL spans in the registry at onStart time, so
+        // Record suppressed spans in the registry at onStart time, so
         // that ReparentingSpanExporter can re-parent surviving children before
         // this span ends and is dropped. With SimpleSpanProcessor (and even
         // BatchSpanProcessor), children are typically exported before their
@@ -74,7 +81,7 @@ public class FilteringSpanProcessor implements SpanProcessor {
         //
         // This is also where the decision is taken for the span's whole
         // lifetime: onEnd reads the registry instead of the flag.
-        if (span.getKind() == SpanKind.INTERNAL && telemetryLevel.shouldSuppressInternal()) {
+        if (telemetryLevel.level().suppresses(span.getKind())) {
             SpanContext parent = span.getParentSpanContext();
             // A suppressed root span is recorded against an invalid parent, so
             // onEnd can still find it and its children are promoted to roots
@@ -88,8 +95,8 @@ public class FilteringSpanProcessor implements SpanProcessor {
 
     @Override
     public boolean isStartRequired() {
-        // Must be true: we need onStart() to pre-record suppressed INTERNAL
-        // spans in the registry before any child spans are exported.
+        // Must be true: we need onStart() to pre-record suppressed spans in
+        // the registry before any child spans are exported.
         return true;
     }
 
@@ -97,8 +104,7 @@ public class FilteringSpanProcessor implements SpanProcessor {
     public void onEnd(ReadableSpan span) {
         // Deliberately the registry and not the flag: the decision belongs to
         // onStart, and re-asking could answer differently for the same span.
-        if (span.getKind() == SpanKind.INTERNAL
-                && registry.isSuppressed(span.getSpanContext().getSpanId())) {
+        if (registry.isSuppressed(span.getSpanContext().getSpanId())) {
             return; // don't forward to delegate (BatchSpanProcessor)
         }
         delegate.onEnd(span);

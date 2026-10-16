@@ -22,11 +22,13 @@ import dev.openfeature.contrib.providers.flagd.FlagdProvider;
 import dev.openfeature.sdk.Client;
 import dev.openfeature.sdk.EventDetails;
 import dev.openfeature.sdk.OpenFeatureAPI;
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Binds {@link TelemetryLevelResolver} to a real flagd
+ * Binds {@link TelemetryLevelResolver}s for {@code telemetryLevel} and
+ * {@code otelEnabled} to a real flagd
  * <a href="https://flagd.dev/reference/specifications/in-process-providers/">in-process</a>
  * OpenFeature provider.
  *
@@ -45,6 +47,14 @@ import java.util.logging.Logger;
  *       polling client has no such signal.</li>
  * </ul>
  *
+ * <p>Two flags are resolved, each with its own {@link TelemetryLevelResolver},
+ * and combined as "off if either says off": {@code otelEnabled=false} is
+ * {@link TelemetryLevel#OFF} whatever {@code telemetryLevel} says, and
+ * {@code otelEnabled=true} defers to {@code telemetryLevel}. The boolean is the
+ * one to flip by hand; the {@code OFF} variant is there for whoever already
+ * manages {@code telemetryLevel}. Both fail open: a missing flag, a wrong type
+ * or a provider error leaves tracing on.
+ *
  * <p>Configuration, all optional:
  *
  * <ul>
@@ -52,7 +62,9 @@ import java.util.logging.Logger;
  *   <li>{@code FLAGD_PORT} - flagd gRPC <em>sync</em> port (default: {@code 8015};
  *       note this is not the {@code 8013} evaluation port, nor the {@code 8016}
  *       OFREP port the previous implementation polled)</li>
- *   <li>{@code OTELFEATURE_FLAG_NAME} - flag key (default: {@code telemetryLevel})</li>
+ *   <li>{@code OTELFEATURE_FLAG_NAME} - level flag key (default: {@code telemetryLevel})</li>
+ *   <li>{@code OTELFEATURE_ENABLED_FLAG_NAME} - kill-switch flag key (default:
+ *       {@code otelEnabled})</li>
  * </ul>
  */
 public final class FlagdTelemetryLevel implements TelemetryLevelSource {
@@ -63,10 +75,13 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
     private static final int DEFAULT_SYNC_PORT = 8015;
 
     private final OpenFeatureAPI api;
-    private final TelemetryLevelResolver resolver;
+    private final TelemetryLevelResolver<String> levelResolver;
+    private final TelemetryLevelResolver<Boolean> enabledResolver;
 
     public FlagdTelemetryLevel() {
-        this(env("OTELFEATURE_FLAG_NAME", "telemetryLevel"), inProcessOptions());
+        this(env("OTELFEATURE_FLAG_NAME", "telemetryLevel"),
+                env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled"),
+                inProcessOptions());
     }
 
     /**
@@ -74,10 +89,11 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
      * {@code FILE} resolver, which shares the parser, targeting engine and
      * configuration-change events with {@code IN_PROCESS}.
      *
-     * @param flagKey the flag to resolve
+     * @param levelFlagKey the {@code telemetryLevel} flag to resolve
+     * @param enabledFlagKey the {@code otelEnabled} flag to resolve
      * @param options how to reach flagd
      */
-    FlagdTelemetryLevel(String flagKey, FlagdOptions options) {
+    FlagdTelemetryLevel(String levelFlagKey, String enabledFlagKey, FlagdOptions options) {
         // createIsolated(), deliberately not getInstance(): this extension runs
         // inside somebody else's application, and that application may well use
         // OpenFeature itself. Registering our flagd provider on the global
@@ -85,9 +101,12 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
         this.api = OpenFeatureAPI.createIsolated();
         Client client = api.getClient();
 
-        this.resolver = new TelemetryLevelResolver(
-                flagKey,
-                context -> client.getStringDetails(flagKey, TelemetryLevelResolver.DEFAULT_VALUE, context));
+        this.levelResolver = TelemetryLevelResolver.telemetryLevel(
+                levelFlagKey,
+                context -> client.getStringDetails(levelFlagKey, TelemetryLevelResolver.DEFAULT_VALUE, context));
+        this.enabledResolver = TelemetryLevelResolver.otelEnabled(
+                enabledFlagKey,
+                context -> client.getBooleanDetails(enabledFlagKey, TelemetryLevelResolver.DEFAULT_ENABLED, context));
 
         // Subscribe before registering the provider, so no event can land in
         // the gap. The SDK also replays the current state to a handler as it is
@@ -98,8 +117,8 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
         client.onProviderStale(this::reclassify);
 
         // setProvider, not setProviderAndWait: agent startup must not block on
-        // flagd being reachable. Until the provider is ready the flag resolves
-        // to its default, which is "suppress nothing".
+        // flagd being reachable. Until the provider is ready both flags resolve
+        // to their defaults, which is "suppress nothing".
         api.setProvider(new FlagdProvider(options));
     }
 
@@ -107,6 +126,7 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
         String host = env("FLAGD_HOST", DEFAULT_HOST);
         int port = envPort(DEFAULT_SYNC_PORT);
         log.info("otelfeature-java-extension: resolving '" + env("OTELFEATURE_FLAG_NAME", "telemetryLevel")
+                + "' and '" + env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled")
                 + "' from flagd's in-process sync stream at " + host + ":" + port);
         return FlagdOptions.builder()
                 .resolverType(Config.Resolver.IN_PROCESS)
@@ -116,8 +136,14 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
     }
 
     private void reclassify(EventDetails details) {
+        List<String> flagsChanged = details == null ? null : details.getFlagsChanged();
+        reclassify(enabledResolver, flagsChanged);
+        reclassify(levelResolver, flagsChanged);
+    }
+
+    private static void reclassify(TelemetryLevelResolver<?> resolver, List<String> flagsChanged) {
         try {
-            resolver.classify(details == null ? null : details.getFlagsChanged());
+            resolver.classify(flagsChanged);
         } catch (Throwable t) {
             // An exception escaping here would propagate into the SDK's event
             // dispatch; telemetry configuration must never take the host
@@ -127,8 +153,12 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
     }
 
     @Override
-    public boolean shouldSuppressInternal() {
-        return resolver.shouldSuppressInternal();
+    public TelemetryLevel level() {
+        // The kill switch first: while it is off, telemetryLevel is not asked.
+        if (enabledResolver.level() == TelemetryLevel.OFF) {
+            return TelemetryLevel.OFF;
+        }
+        return levelResolver.level();
     }
 
     @Override
@@ -137,13 +167,23 @@ public final class FlagdTelemetryLevel implements TelemetryLevelSource {
     }
 
     /**
-     * Visible for testing: the kept answer, or {@code null} when every span is
-     * evaluated.
+     * Visible for testing: the kept {@code telemetryLevel} answer, or
+     * {@code null} when every span evaluates it.
+     *
+     * @return the cached level, or {@code null} if there isn't one
+     */
+    TelemetryLevel cachedLevel() {
+        return levelResolver.cachedDecision();
+    }
+
+    /**
+     * Visible for testing: the kept {@code otelEnabled} answer ({@code OFF} for
+     * false, {@code FULL} for true), or {@code null} when every span evaluates it.
      *
      * @return the cached decision, or {@code null} if there isn't one
      */
-    Boolean cachedDecision() {
-        return resolver.cachedDecision();
+    TelemetryLevel cachedEnabled() {
+        return enabledResolver.cachedDecision();
     }
 
     private static String env(String name, String fallback) {
