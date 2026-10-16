@@ -259,7 +259,8 @@ class RecordSpanIntegrationTest {
     @DisplayName("a static recordSpan adds no per-span evaluation")
     void staticRecordSpanIsCached() throws IOException {
         start(Enforcement.PROCESSOR, flags(GLOBAL_ON, null));
-        assertTrue(waitFor(() -> Boolean.TRUE.equals(policy.cachedRecord())), "recordSpan never cached");
+        assertTrue(waitFor(() -> Boolean.TRUE.equals(policy.cachedRecord()) && policy.cachedPolicy() != null),
+                "recordSpan never cached");
 
         for (int i = 0; i < 100; i++) {
             weatherRequest();

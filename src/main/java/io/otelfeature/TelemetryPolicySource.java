@@ -58,28 +58,40 @@ public interface TelemetryPolicySource {
     }
 
     /**
-     * The policy from the global switches alone ({@code OTEL_SDK_DISABLED},
-     * {@code otelEnabled}, {@code telemetryLevel}), with {@code record} taken
-     * as {@code true}: for decisions a per-span flag cannot change, so it need
-     * not be evaluated.
+     * The policy for a span, with only the fields {@code need} covers. An
+     * implementation evaluates only the flags those fields come from, so a
+     * targeted {@code recordSpan} or {@code traceSampleRatio} costs nothing
+     * where it cannot change the decision.
      *
      * @param span the span the decision is for
-     * @return the policy without {@code recordSpan}
+     * @param need which fields matter
+     * @return the narrowed policy
      */
-    default TelemetryPolicy globalPolicy(SpanStart span) {
-        TelemetryPolicy p = policy(span);
-        return TelemetryPolicy.of(p.enabled(), p.suppressInternal(), true);
+    default TelemetryPolicy policy(SpanStart span, TelemetryPolicy.Need need) {
+        return policy(span).narrow(need);
     }
 
     /**
-     * {@link #globalPolicy(SpanStart)} without the span, if the global switches
-     * don't depend on it.
+     * {@link #policy(SpanStart, TelemetryPolicy.Need)} without the span, if
+     * those fields don't depend on it.
      *
-     * @return the span-independent global policy, or {@code null}
+     * @param need which fields matter
+     * @return the span-independent narrowed policy, or {@code null}
      */
-    default TelemetryPolicy cachedGlobalPolicy() {
+    default TelemetryPolicy cachedPolicy(TelemetryPolicy.Need need) {
         TelemetryPolicy p = cachedPolicy();
-        return p == null ? null : TelemetryPolicy.of(p.enabled(), p.suppressInternal(), true);
+        return p == null ? null : p.narrow(need);
+    }
+
+    /**
+     * Whether {@code traceSampleRatio} may be overriding the agent's sampler
+     * right now - set, or targeted so that it may be for some traces. While it
+     * is, children follow their parent's decision rather than the delegate's.
+     *
+     * @return {@code true} if a ratio may be in play; the default says no
+     */
+    default boolean sampleRatioInPlay() {
+        return false;
     }
 
     /** Releases whatever backs this source. The default does nothing. */

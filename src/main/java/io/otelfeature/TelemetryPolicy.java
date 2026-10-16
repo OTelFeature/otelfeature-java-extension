@@ -35,6 +35,9 @@ import java.util.function.Function;
  *       {@code INTERNAL} spans.</li>
  *   <li>{@code record} - {@code recordSpan}, per span: {@code false} drops this
  *       one span. It never re-enables what {@code enabled} turned off.</li>
+ *   <li>{@code sampleRatio} - {@code traceSampleRatio}: the fraction of new
+ *       traces to sample, {@code 0.0}-{@code 1.0}; {@code NaN} for "no
+ *       override, the agent's configured sampler decides".</li>
  * </ul>
  *
  * <p>Further flags (sample ratio, disabled instrumentation scopes) add a field
@@ -43,24 +46,56 @@ import java.util.function.Function;
  * @param enabled whether any span may be exported
  * @param suppressInternal whether {@code INTERNAL} spans are dropped
  * @param record whether this span is recorded ({@code recordSpan})
+ * @param sampleRatio the root sampling ratio, or {@code NaN} for no override
  */
-public record TelemetryPolicy(boolean enabled, boolean suppressInternal, boolean record) {
+public record TelemetryPolicy(boolean enabled, boolean suppressInternal, boolean record, double sampleRatio) {
+
+    /** "No override": the agent's configured sampler decides. */
+    static final double DELEGATE = Double.NaN;
+
+    /**
+     * Which fields a decision needs, so a flag is only evaluated where it can
+     * change the outcome.
+     */
+    public enum Need {
+        /** {@code enabled} and {@code suppressInternal}: the global switches. */
+        GLOBAL,
+        /** ... and {@code record}: a decision about this one span. */
+        SPAN,
+        /** ... and {@code sampleRatio}: a decision about a new trace. */
+        ROOT
+    }
+
+    /**
+     * This policy with only the fields {@code need} covers; the rest at their
+     * neutral values ({@code record=true}, no sample ratio).
+     *
+     * @param need the fields to keep
+     * @return the narrowed policy, a shared instance unless it keeps a ratio
+     */
+    public TelemetryPolicy narrow(Need need) {
+        return switch (need) {
+            case ROOT -> this;
+            case SPAN -> of(enabled, suppressInternal, record);
+            case GLOBAL -> of(enabled, suppressInternal, true);
+        };
+    }
 
     /** Trace everything: the stock agent's behaviour. */
-    public static final TelemetryPolicy FULL = new TelemetryPolicy(true, false, true);
+    public static final TelemetryPolicy FULL = new TelemetryPolicy(true, false, true, DELEGATE);
 
     /** Drop {@code INTERNAL} spans, keep the edges. */
-    public static final TelemetryPolicy IO = new TelemetryPolicy(true, true, true);
+    public static final TelemetryPolicy IO = new TelemetryPolicy(true, true, true, DELEGATE);
 
     /** Drop every span. */
-    public static final TelemetryPolicy DISABLED = new TelemetryPolicy(false, false, true);
+    public static final TelemetryPolicy DISABLED = new TelemetryPolicy(false, false, true, DELEGATE);
 
     /**
      * Drop this span ({@code recordSpan=false}); tracing as such stays on.
      * {@code suppressInternal} is not carried: the span is dropped whatever its
      * kind, and the policy is per span.
      */
-    public static final TelemetryPolicy NOT_RECORDED = new TelemetryPolicy(true, false, false);
+    public static final TelemetryPolicy NOT_RECORDED = new TelemetryPolicy(true, false, false, DELEGATE);
 
     /**
      * The policy for the given fields, without allocating: this is called on
@@ -94,6 +129,50 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal, boolean
     }
 
     /**
+     * The policy for the given fields. Allocates only when a sample ratio is
+     * actually set and still matters (tracing enabled, span recorded).
+     *
+     * @param enabled whether any span may be exported
+     * @param suppressInternal whether {@code INTERNAL} spans are dropped
+     * @param record whether this span is recorded
+     * @param sampleRatio the root sampling ratio, or {@code NaN}
+     * @return the policy
+     */
+    static TelemetryPolicy of(boolean enabled, boolean suppressInternal, boolean record, double sampleRatio) {
+        if (!enabled || !record || Double.isNaN(sampleRatio)) {
+            return of(enabled, suppressInternal, record);
+        }
+        return new TelemetryPolicy(true, suppressInternal, true, sampleRatio);
+    }
+
+    /**
+     * Whether {@code traceSampleRatio} overrides the agent's sampler for new
+     * traces.
+     *
+     * @return {@code true} if {@link #sampleRatio()} is set
+     */
+    public boolean overridesSampleRatio() {
+        return !Double.isNaN(sampleRatio);
+    }
+
+    /**
+     * {@code traceSampleRatio} as the policy reads it: above {@code 1.0} it is
+     * clamped to {@code 1.0}; a negative value, or anything that isn't a finite
+     * number, is no answer at all, and the fallback applies. A negative ratio
+     * is far more likely a typo than a wish to drop every trace, and failing
+     * open is the safer reading.
+     *
+     * @param value the flag's value
+     * @return the ratio, or {@code null}
+     */
+    static Double clampRatio(Double value) {
+        if (value == null || value.isNaN() || value.isInfinite() || value < 0.0) {
+            return null;
+        }
+        return Math.min(1.0, value);
+    }
+
+    /**
      * Whether a span of the given kind is dropped under this policy.
      *
      * @param kind the span's kind
@@ -120,6 +199,10 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal, boolean
      *       setting for it.</li>
      *   <li>{@code record} - {@code true}: the stock agent records every span
      *       it samples.</li>
+     *   <li>{@code sampleRatio} - {@code NaN}: the agent's own sampler
+     *       ({@code OTEL_TRACES_SAMPLER} / {@code OTEL_TRACES_SAMPLER_ARG}) is
+     *       the floor, and decides whenever {@code traceSampleRatio} is
+     *       missing or unreadable.</li>
      * </ul>
      *
      * @return the startup defaults

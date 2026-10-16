@@ -423,7 +423,9 @@ class FlagAwareSamplerTest {
     void description() {
         FlagAwareSampler sampler = new FlagAwareSampler(Sampler.alwaysOn(), span -> TelemetryPolicy.FULL);
 
-        assertEquals("FlagAwareSampler{delegate=AlwaysOnSampler}", sampler.getDescription());
+        assertEquals("FlagAwareSampler{delegate=AlwaysOnSampler, enforcement=sampler}", sampler.getDescription());
+        assertEquals("FlagAwareSampler{delegate=AlwaysOnSampler, enforcement=processor}",
+                new FlagAwareSampler(Sampler.alwaysOn(), span -> TelemetryPolicy.FULL, false).getDescription());
     }
 
     @ParameterizedTest

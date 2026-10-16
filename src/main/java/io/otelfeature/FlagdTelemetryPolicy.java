@@ -59,6 +59,8 @@ import java.util.logging.Logger;
  *   <li>{@code suppressInternal} is {@code telemetryLevel == IO}.</li>
  *   <li>{@code record} is {@code recordSpan}, a per-span boolean, asked only
  *       when the two above leave tracing on.</li>
+ *   <li>{@code sampleRatio} is {@code traceSampleRatio}, a double clamped into
+ *       {@code 0.0}-{@code 1.0}, asked only for a span that is recorded.</li>
  * </ul>
  *
  * <p>{@code OTEL_SDK_DISABLED=true} is a hard floor: the policy is then
@@ -82,6 +84,8 @@ import java.util.logging.Logger;
  *       {@code otelEnabled})</li>
  *   <li>{@code OTELFEATURE_RECORD_SPAN_FLAG_NAME} - per-span flag key (default:
  *       {@code recordSpan})</li>
+ *   <li>{@code OTELFEATURE_SAMPLE_RATIO_FLAG_NAME} - sample-ratio flag key
+ *       (default: {@code traceSampleRatio})</li>
  * </ul>
  */
 public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
@@ -95,6 +99,27 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     private final TelemetryFlag<String, TelemetryLevel> levelFlag;
     private final TelemetryFlag<Boolean, Boolean> enabledFlag;
     private final TelemetryFlag<Boolean, Boolean> recordFlag;
+    private final TelemetryFlag<Double, Double> ratioFlag;
+
+    /**
+     * The span-independent policy for each {@link TelemetryPolicy.Need},
+     * composed once per reclassification rather than per span (a policy with
+     * a sample ratio is not a shared constant); an entry is {@code null} if a
+     * flag it needs has to be evaluated per span.
+     */
+    private volatile Composed composed = Composed.NONE;
+
+    private record Composed(TelemetryPolicy global, TelemetryPolicy span, TelemetryPolicy root) {
+        static final Composed NONE = new Composed(null, null, null);
+
+        TelemetryPolicy get(TelemetryPolicy.Need need) {
+            return switch (need) {
+                case GLOBAL -> global;
+                case SPAN -> span;
+                case ROOT -> root;
+            };
+        }
+    }
     private final EvaluationContextFactory contexts = new EvaluationContextFactory();
 
     /**
@@ -107,6 +132,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         this(env("OTELFEATURE_FLAG_NAME", "telemetryLevel"),
                 env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled"),
                 env("OTELFEATURE_RECORD_SPAN_FLAG_NAME", "recordSpan"),
+                env("OTELFEATURE_SAMPLE_RATIO_FLAG_NAME", "traceSampleRatio"),
                 TelemetryPolicy.startupDefaults(),
                 inProcessOptions());
     }
@@ -137,6 +163,21 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
      */
     FlagdTelemetryPolicy(String levelFlagKey, String enabledFlagKey, String recordFlagKey,
             TelemetryPolicy defaults, FlagdOptions options) {
+        this(levelFlagKey, enabledFlagKey, recordFlagKey, "traceSampleRatio", defaults, options);
+    }
+
+    /**
+     * Visible for testing, with every flag key.
+     *
+     * @param levelFlagKey the {@code telemetryLevel} flag to resolve
+     * @param enabledFlagKey the {@code otelEnabled} flag to resolve
+     * @param recordFlagKey the {@code recordSpan} flag to resolve
+     * @param ratioFlagKey the {@code traceSampleRatio} flag to resolve
+     * @param defaults the per-field fallback
+     * @param options how to reach flagd
+     */
+    FlagdTelemetryPolicy(String levelFlagKey, String enabledFlagKey, String recordFlagKey,
+            String ratioFlagKey, TelemetryPolicy defaults, FlagdOptions options) {
         // createIsolated(), deliberately not getInstance(): this extension runs
         // inside somebody else's application, and that application may well use
         // OpenFeature itself. Registering our flagd provider on the global
@@ -161,6 +202,11 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
                 context -> client.getBooleanDetails(recordFlagKey, defaults.record(), context),
                 record -> record,
                 defaults.record());
+        this.ratioFlag = new TelemetryFlag<>(
+                ratioFlagKey,
+                context -> client.getDoubleDetails(ratioFlagKey, defaults.sampleRatio(), context),
+                TelemetryPolicy::clampRatio,
+                defaults.sampleRatio());
 
         // Subscribe before registering the provider, so no event can land in
         // the gap. The SDK also replays the current state to a handler as it is
@@ -181,7 +227,8 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         int port = envPort(DEFAULT_SYNC_PORT);
         log.info("otelfeature-java-extension: resolving '" + env("OTELFEATURE_FLAG_NAME", "telemetryLevel")
                 + "', '" + env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled")
-                + "' and '" + env("OTELFEATURE_RECORD_SPAN_FLAG_NAME", "recordSpan")
+                + "', '" + env("OTELFEATURE_RECORD_SPAN_FLAG_NAME", "recordSpan")
+                + "' and '" + env("OTELFEATURE_SAMPLE_RATIO_FLAG_NAME", "traceSampleRatio")
                 + "' from flagd's in-process sync stream at " + host + ":" + port);
         return FlagdOptions.builder()
                 .resolverType(Config.Resolver.IN_PROCESS)
@@ -190,11 +237,16 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
                 .build();
     }
 
-    private void reclassify(EventDetails details) {
+    // synchronized: two events composing at once could otherwise publish a
+    // policy built from the older set of decisions last.
+    private synchronized void reclassify(EventDetails details) {
         List<String> flagsChanged = details == null ? null : details.getFlagsChanged();
         reclassify(enabledFlag, flagsChanged);
         reclassify(levelFlag, flagsChanged);
         reclassify(recordFlag, flagsChanged);
+        reclassify(ratioFlag, flagsChanged);
+        composed = new Composed(compose(TelemetryPolicy.Need.GLOBAL), compose(TelemetryPolicy.Need.SPAN),
+                compose(TelemetryPolicy.Need.ROOT));
     }
 
     private static void reclassify(TelemetryFlag<?, ?> flag, List<String> flagsChanged) {
@@ -210,41 +262,85 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
 
     @Override
     public TelemetryPolicy cachedPolicy() {
+        return cachedPolicy(TelemetryPolicy.Need.ROOT);
+    }
+
+    @Override
+    public TelemetryPolicy cachedPolicy(TelemetryPolicy.Need need) {
         // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
         // they never enable what the environment turned off.
         if (!floorEnabled) {
             return TelemetryPolicy.DISABLED;
         }
-        // Static flags, without building anything: two volatile reads.
-        Boolean enabled = enabledFlag.cachedDecision();
-        if (enabled != null) {
-            if (!enabled) {
-                return TelemetryPolicy.DISABLED;
-            }
-            TelemetryLevel level = levelFlag.cachedDecision();
-            if (level == TelemetryLevel.OFF) {
-                return TelemetryPolicy.DISABLED;
-            }
-            Boolean record = recordFlag.cachedDecision();
-            if (level != null && record != null) {
-                return of(level, record);
-            }
+        // One volatile read: composed when the flags were last classified.
+        return composed.get(need);
+    }
+
+    @Override
+    public boolean sampleRatioInPlay() {
+        Double ratio = ratioFlag.cachedDecision();
+        if (ratio != null) {
+            return !ratio.isNaN();
         }
-        return null;
+        // Targeted (or failing uncached): it may be set for some traces. Not
+        // classified yet (provider not ready): it cannot be - the fallback is
+        // "no override".
+        return ratioFlag.evaluatedPerSpan();
+    }
+
+    /**
+     * The span-independent policy for {@code need} from the cached decisions,
+     * or {@code null}. Runs on reclassification, not per span.
+     */
+    private TelemetryPolicy compose(TelemetryPolicy.Need need) {
+        Boolean enabled = enabledFlag.cachedDecision();
+        if (enabled == null) {
+            return null;
+        }
+        if (!enabled) {
+            return TelemetryPolicy.DISABLED;
+        }
+        TelemetryLevel level = levelFlag.cachedDecision();
+        if (level == null) {
+            return null;
+        }
+        if (level == TelemetryLevel.OFF) {
+            return TelemetryPolicy.DISABLED;
+        }
+        if (need == TelemetryPolicy.Need.GLOBAL) {
+            return of(level, true, TelemetryPolicy.DELEGATE);
+        }
+        Boolean record = recordFlag.cachedDecision();
+        if (record == null) {
+            return null;
+        }
+        if (!record) {
+            return TelemetryPolicy.NOT_RECORDED;
+        }
+        if (need == TelemetryPolicy.Need.SPAN) {
+            return of(level, true, TelemetryPolicy.DELEGATE);
+        }
+        Double ratio = ratioFlag.cachedDecision();
+        return ratio == null ? null : of(level, true, ratio);
     }
 
     @Override
     public TelemetryPolicy policy(SpanStart span) {
-        TelemetryPolicy cached = cachedPolicy();
+        return policy(span, TelemetryPolicy.Need.ROOT);
+    }
+
+    @Override
+    public TelemetryPolicy policy(SpanStart span, TelemetryPolicy.Need need) {
+        TelemetryPolicy cached = cachedPolicy(need);
         if (cached != null) {
             return cached;
         }
         // At least one flag must be evaluated: build the span's context once,
         // on first use, and share it between the flags.
         LazyContext context = new LazyContext(contexts, span);
-        // Precedence: the kill switch, then telemetryLevel, then recordSpan.
-        // Whatever is decided by a higher one, the lower ones are not asked:
-        // recordSpan never re-enables what the global switches turned off.
+        // Precedence: the kill switch, then telemetryLevel, then recordSpan,
+        // then traceSampleRatio. Whatever a higher one decides, the lower ones
+        // are not asked: they never re-enable what a higher one turned off.
         if (!enabledFlag.value(context)) {
             return TelemetryPolicy.DISABLED;
         }
@@ -252,42 +348,30 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         if (level == TelemetryLevel.OFF) {
             return TelemetryPolicy.DISABLED;
         }
-        return of(level, recordFlag.value(context));
+        if (need == TelemetryPolicy.Need.GLOBAL) {
+            return of(level, true, TelemetryPolicy.DELEGATE);
+        }
+        if (!recordFlag.value(context)) {
+            return TelemetryPolicy.NOT_RECORDED;
+        }
+        if (need == TelemetryPolicy.Need.SPAN) {
+            return of(level, true, TelemetryPolicy.DELEGATE);
+        }
+        return of(level, true, ratioFlag.value(context));
     }
 
-    @Override
-    public TelemetryPolicy cachedGlobalPolicy() {
-        if (!floorEnabled) {
-            return TelemetryPolicy.DISABLED;
-        }
-        Boolean enabled = enabledFlag.cachedDecision();
-        if (enabled != null) {
-            if (!enabled) {
-                return TelemetryPolicy.DISABLED;
-            }
-            TelemetryLevel level = levelFlag.cachedDecision();
-            if (level != null) {
-                return of(level, true);
-            }
-        }
-        return null;
+    private static TelemetryPolicy of(TelemetryLevel level, boolean record, double ratio) {
+        return TelemetryPolicy.of(level != TelemetryLevel.OFF, level == TelemetryLevel.IO, record, ratio);
     }
 
-    @Override
-    public TelemetryPolicy globalPolicy(SpanStart span) {
-        TelemetryPolicy cached = cachedGlobalPolicy();
-        if (cached != null) {
-            return cached;
-        }
-        LazyContext context = new LazyContext(contexts, span);
-        if (!enabledFlag.value(context)) {
-            return TelemetryPolicy.DISABLED;
-        }
-        return of(levelFlag.value(context), true);
-    }
-
-    private static TelemetryPolicy of(TelemetryLevel level, boolean record) {
-        return TelemetryPolicy.of(level != TelemetryLevel.OFF, level == TelemetryLevel.IO, record);
+    /**
+     * Visible for testing: the kept {@code traceSampleRatio} answer ({@code NaN}
+     * for "no override"), or {@code null} when every span evaluates it.
+     *
+     * @return the cached ratio, or {@code null}
+     */
+    Double cachedRatio() {
+        return ratioFlag.cachedDecision();
     }
 
     /**

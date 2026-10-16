@@ -94,14 +94,16 @@ public class FilteringSpanProcessor implements SpanProcessor {
         // Static flags answer without the span: getAttributes() copies the
         // span's attributes under its lock, so it is only read when a flag
         // actually has to be evaluated.
-        TelemetryPolicy decision = policy.cachedPolicy();
+        // SPAN: the processor never uses the sample ratio, so a targeted
+        // traceSampleRatio is not evaluated here.
+        TelemetryPolicy decision = policy.cachedPolicy(TelemetryPolicy.Need.SPAN);
         if (decision == null) {
             decision = policy.policy(new SpanStart(
                     span.getSpanContext().getTraceId(),
                     span.getName(),
                     span.getKind(),
                     span.getAttributes(),
-                    span.getInstrumentationScopeInfo()));
+                    span.getInstrumentationScopeInfo()), TelemetryPolicy.Need.SPAN);
         }
         if (decision.suppresses(span.getKind())) {
             SpanContext recordedParent = parent != null && parent.isValid() ? parent : SpanContext.getInvalid();

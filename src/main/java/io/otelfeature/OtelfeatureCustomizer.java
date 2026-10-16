@@ -41,9 +41,11 @@ import java.util.logging.Logger;
  *       shared registry to resolve the nearest non-suppressed ancestor.</li>
  * </ol>
  *
- * <p>With {@code OTELFEATURE_ENFORCEMENT=sampler} a third one joins them:
- * <b>FlagAwareSampler</b> (via {@code addSamplerCustomizer}) drops local roots
- * while tracing is disabled, before the span exists. See {@link Enforcement}.
+ * <p>A third one wraps the agent's sampler: <b>FlagAwareSampler</b> (via
+ * {@code addSamplerCustomizer}). It applies {@code traceSampleRatio} to new
+ * traces in both modes, and with {@code OTELFEATURE_ENFORCEMENT=sampler} also
+ * drops local roots while tracing is disabled, before the span exists. See
+ * {@link Enforcement}.
  *
  * <p>This two-layer approach gives both performance (dropped spans never
  * batched) and correctness (children re-parented, trace hierarchy preserved).
@@ -100,13 +102,16 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
             return resource;
         });
 
+        // Installed in both modes: traceSampleRatio can only be applied by a
+        // sampler. In processor mode it applies the ratio and nothing else.
         AtomicBoolean samplerInstalled = new AtomicBoolean();
-        if (mode == Enforcement.SAMPLER) {
-            autoConfiguration.addSamplerCustomizer((sampler, config) -> {
-                samplerInstalled.set(true);
-                return new FlagAwareSampler(sampler, policy);
-            });
-        }
+        autoConfiguration.addSamplerCustomizer((sampler, config) -> {
+            samplerInstalled.set(true);
+            // OTEL_TRACES_SAMPLER=always_off is a hard floor, like
+            // OTEL_SDK_DISABLED: no flag may sample what it turned off.
+            boolean alwaysOff = "always_off".equalsIgnoreCase(config.getString("otel.traces.sampler", ""));
+            return new FlagAwareSampler(sampler, policy, mode == Enforcement.SAMPLER, alwaysOff);
+        });
 
         TelemetryPolicySource processorPolicy = processorPolicy(policy, mode, samplerInstalled::get);
         autoConfiguration.addSpanProcessorCustomizer(
@@ -184,21 +189,26 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
             }
 
             @Override
-            public TelemetryPolicy globalPolicy(SpanStart span) {
+            public TelemetryPolicy policy(SpanStart span, TelemetryPolicy.Need need) {
                 try {
-                    return view.apply(policy.globalPolicy(span));
+                    return view.apply(policy.policy(span, need));
                 } catch (Throwable t) {
                     return TelemetryPolicy.FULL;
                 }
             }
 
             @Override
-            public TelemetryPolicy cachedGlobalPolicy() {
+            public TelemetryPolicy cachedPolicy(TelemetryPolicy.Need need) {
                 try {
-                    return view.apply(policy.cachedGlobalPolicy());
+                    return view.apply(policy.cachedPolicy(need));
                 } catch (Throwable t) {
                     return TelemetryPolicy.FULL;
                 }
+            }
+
+            @Override
+            public boolean sampleRatioInPlay() {
+                return policy.sampleRatioInPlay();
             }
         };
     }

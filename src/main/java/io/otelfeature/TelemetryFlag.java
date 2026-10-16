@@ -131,6 +131,19 @@ final class TelemetryFlag<T, R> {
      * @param flagsChanged the keys the provider reported as changed, or
      *     {@code null}/empty when it didn't say (READY, ERROR, STALE)
      */
+    /** Whether {@link #classify} has run at least once (the provider is or was ready). */
+    private volatile boolean classified;
+
+    /**
+     * Whether the flag has been classified as evaluated per span - targeted,
+     * or failing in a way that isn't cached - as opposed to not classified yet.
+     *
+     * @return {@code true} if classified and not cached
+     */
+    boolean evaluatedPerSpan() {
+        return classified && cached.get() == null;
+    }
+
     synchronized void classify(List<String> flagsChanged) {
         // When the provider names the keys that moved and ours isn't among
         // them, nothing about our classification can have changed.
@@ -154,6 +167,7 @@ final class TelemetryFlag<T, R> {
         R decision = cacheable ? meaning : null;
 
         R previous = cached.getAndSet(decision);
+        classified = true;
         if (!Objects.equals(previous, decision)) {
             if (decision == null) {
                 log.info("otelfeature-java-extension: " + flagKey + " resolves with reason="
@@ -231,6 +245,13 @@ final class TelemetryFlag<T, R> {
         }
     }
 
+    private String describeFallback() {
+        if (fallback instanceof Double d && d.isNaN()) {
+            return "(no override: the agent's sampler decides)";
+        }
+        return String.valueOf(fallback);
+    }
+
     /**
      * Logs a problem the first time it is seen - once per transition into it,
      * not once per span.
@@ -246,7 +267,7 @@ final class TelemetryFlag<T, R> {
         }
         String message = "otelfeature-java-extension: " + flagKey + " cannot be used (" + problem
                 + (detail == null || detail.isBlank() ? "" : ": " + detail)
-                + ") - using the startup default " + fallback
+                + ") - using the startup default " + describeFallback()
                 + "; logged once until it resolves or the problem changes";
         log.log(quietly ? Level.FINE : Level.WARNING, message);
     }

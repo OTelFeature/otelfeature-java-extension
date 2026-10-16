@@ -124,6 +124,87 @@ cached until the ruleset changes. A missing flag or a provider error records
 > suppressed `INTERNAL` spans are. Propagation also has a cost: see
 > [Known limitations](#known-limitations).
 
+### Sampling ratio: `traceSampleRatio`
+
+`OTEL_TRACES_SAMPLER_ARG` is read once, when the SDK starts. `traceSampleRatio`
+is the same knob, live: a double flag, `0.0`–`1.0`, giving the fraction of
+**new traces** to sample. "Turn sampling up to 100% for ten minutes" becomes a
+flag flip, and `0.0` is `always_off` for free.
+
+```json
+"traceSampleRatio": {
+  "state": "ENABLED",
+  "defaultVariant": "tenth",
+  "variants": { "tenth": 0.1, "all": 1.0 },
+  "targeting": { "if": [ { "==": [ { "var": "deployment.environment.name" }, "staging" ] }, "all", null ] }
+}
+```
+
+- **Where it applies.** It applies at a trace root, meaning a span with no
+  parent at all. The ratio replaces the agent's sampler for that decision,
+  sampling by trace id (`Sampler.traceIdRatioBased`). It works the same in both
+  [enforcement modes](#enforcement-processor-or-sampler): `FlagAwareSampler`
+  wraps the agent's sampler in `processor` mode too, and there it applies only
+  the ratio.
+- **Consistent across services.** Sampling by trace id means every Java service
+  with the same ratio makes the same call for the same trace. The decision is
+  the Java SDK's `traceidratio` formula. **Java and Python can disagree** on the
+  same trace id at the same ratio, because Python's SDK reads the trace id's
+  low 64 bits unsigned and Java's reads them signed. That doesn't matter when
+  downstream services follow their parent, which they do: only the trace's
+  entry service decides. To vary the ratio
+  itself by trace, use flagd's `fractional`: its `targetingKey` is the trace id
+  (see the [evaluation context](#the-evaluation-context-just-your-opentelemetry-attributes)),
+  so a trace lands in the same bucket everywhere.
+- **Whole traces, whatever the agent's sampler.** While a ratio is in play
+  (set, or targeted), every span with a parent follows its parent's decision,
+  even if the agent's sampler is not parent-based (`always_on`, `traceidratio`,
+  `jaeger_remote`). Otherwise that sampler would re-decide the children of a
+  root the ratio decided. With no ratio in play, the agent's sampler decides
+  everything, as always.
+- **Fail open.** A value above `1.0` is clamped to `1.0`. A negative value, a
+  value that isn't a number, a missing flag, or a provider error means "no
+  override": the agent's own sampler (`OTEL_TRACES_SAMPLER` /
+  `OTEL_TRACES_SAMPLER_ARG`) decides, exactly as without this extension. A
+  negative ratio is far more likely a typo than "drop every trace". JSON
+  integers (`0`, `1`) read as numbers.
+- **`OTEL_TRACES_SAMPLER=always_off` is a hard floor**, like
+  `OTEL_SDK_DISABLED`: flags never enable what it turned off. Neither
+  `traceSampleRatio` nor a sampled upstream parent causes sampling.
+- **Precedence.** `OTEL_SDK_DISABLED` / `OTEL_TRACES_SAMPLER=always_off` >
+  `otelEnabled` / `telemetryLevel=OFF` > `recordSpan` > `traceSampleRatio`. The
+  ratio only decides traces that are otherwise traced and recorded.
+- **Cost.** Only a new trace's root evaluates the ratio. The processor, and the
+  sampler for every other span, never do, so a targeted ratio costs one
+  evaluation per *trace*, not per span.
+
+> [!IMPORTANT]
+> **Sampling flags do not apply retroactively or mid-trace. Flip them at the
+> entry point.** Only a span with no parent is sampled by the ratio. A request
+> that arrives with a `traceparent` follows its caller's decision, through the
+> agent's parent-based sampler. So turning `traceSampleRatio` up on a
+> downstream service does almost nothing: the edge service has already decided
+> and propagated that decision. Target the rule at the service that starts the
+> traces (`service.name` in the context), or roll it out everywhere at the same
+> ratio.
+
+**Prior art: `jaeger_remote`.** OpenTelemetry already ships a
+remotely controlled sampler, `OTEL_TRACES_SAMPLER=jaeger_remote`, which polls
+sampling strategies from a Jaeger-compatible endpoint. `traceSampleRatio` covers
+much of the same ground, with two differences:
+- it reuses flag infrastructure the organisation already runs (flagd and
+  OpenFeature), with no sampling-strategy server to deploy;
+- it gets OpenFeature **targeting** for free: a ratio by
+  `deployment.environment.name`, `service.name` or region, a percentage
+  rollout, or a rule over the service's own error rate.
+
+`jaeger_remote` remains the better fit where per-operation adaptive sampling
+strategies are needed, or where Jaeger already serves them. Because
+`FlagAwareSampler` wraps whatever sampler is configured, the two can run side
+by side: the remote sampler decides whenever `traceSampleRatio` is not set.
+While it is set, the ratio replaces the remote sampler's per-operation strategy
+at every root, and the remote sampler's decisions for children with it.
+
 ### Known limitations
 
 `OFF` / `otelEnabled=false` is kept for completeness, with these trade-offs
@@ -370,6 +451,7 @@ java -javaagent:opentelemetry-javaagent.jar -jar your-app.jar
 | `OTELFEATURE_FLAG_NAME`               | `telemetryLevel` | flagd key of the level flag (`FULL`/`IO`/`OFF`) |
 | `OTELFEATURE_ENABLED_FLAG_NAME`       | `otelEnabled`    | flagd key of the boolean kill switch            |
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME`   | `recordSpan`     | flagd key of the per-span boolean               |
+| `OTELFEATURE_SAMPLE_RATIO_FLAG_NAME`  | `traceSampleRatio` | flagd key of the sampling ratio (`0.0`–`1.0`) |
 | `OTELFEATURE_ENFORCEMENT`             | `processor`      | `processor` or `sampler`, see [Enforcement](#enforcement-processor-or-sampler) |
 
 > [!IMPORTANT]

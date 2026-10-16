@@ -65,6 +65,17 @@ import java.util.logging.Logger;
  *       {@link FilteringSpanProcessor}, which re-parents the survivors.</li>
  * </ul>
  *
+ * <p>{@code traceSampleRatio}, in both enforcement modes: a trace root with no
+ * parent at all is sampled by trace id at the flag's ratio instead of by the
+ * delegate ({@code Sampler.traceIdRatioBased}), so every service applying the
+ * same ratio makes the same call for the same trace. Every span with a parent,
+ * local or remote, stays with the delegate: parent-based decisions are never
+ * second-guessed mid-trace, which is why the ratio has to be changed at the
+ * entry point. With no ratio set, the delegate decides as before.
+ *
+ * <p>In {@code processor} mode only the ratio applies here; {@code OFF} and
+ * {@code recordSpan} are left to the processor.
+ *
  * <p>Fails open: if the policy cannot be read, the delegate decides.
  */
 final class FlagAwareSampler implements Sampler {
@@ -73,11 +84,47 @@ final class FlagAwareSampler implements Sampler {
 
     private final Sampler delegate;
     private final TelemetryPolicySource policy;
+    private final boolean enforce;
     private final AtomicBoolean warned = new AtomicBoolean();
 
+    /**
+     * {@code OTEL_TRACES_SAMPLER=always_off}: a hard floor. Flags only reduce
+     * telemetry, so no ratio and no sampled parent may sample anything.
+     */
+    private final boolean delegateAlwaysOff;
+
+    /** Sampler mode: enforces {@code enabled} and {@code recordSpan}, and applies the ratio. */
     FlagAwareSampler(Sampler delegate, TelemetryPolicySource policy) {
+        this(delegate, policy, true);
+    }
+
+    /**
+     * @param delegate the agent's configured sampler
+     * @param policy where the flags come from
+     * @param enforce {@code true} in sampler mode (drops for {@code enabled} and
+     *     {@code recordSpan}); {@code false} in processor mode, where only the
+     *     sample ratio is applied here
+     */
+    FlagAwareSampler(Sampler delegate, TelemetryPolicySource policy, boolean enforce) {
+        this(delegate, policy, enforce, false);
+    }
+
+    /**
+     * @param delegate the agent's configured sampler
+     * @param policy where the flags come from
+     * @param enforce {@code true} in sampler mode
+     * @param configuredAlwaysOff {@code true} if {@code otel.traces.sampler} is
+     *     {@code always_off}; an {@code AlwaysOffSampler} delegate is
+     *     recognised either way
+     */
+    FlagAwareSampler(Sampler delegate, TelemetryPolicySource policy, boolean enforce,
+            boolean configuredAlwaysOff) {
         this.delegate = delegate;
         this.policy = policy;
+        this.enforce = enforce;
+        this.delegateAlwaysOff = configuredAlwaysOff
+                || delegate == Sampler.alwaysOff()
+                || "AlwaysOffSampler".equals(delegate.getDescription());
     }
 
     @Override
@@ -100,14 +147,21 @@ final class FlagAwareSampler implements Sampler {
         boolean askEnabled = localRoot || !parent.isSampled();
         // recordSpan=false may only DROP where losing the subtree is the
         // intended outcome: a trace root (the whole trace goes) or a leaf that propagates
-        // nothing (a DB call over its own wire protocol). Anything else that
-        // propagates mid-trace - including a request arriving with a sampled
-        // traceparent - is left to the processor, which suppresses it and
-        // re-parents its children, so downstream services never inherit
-        // sampled=0.
+        // nothing (a DB call over its own wire protocol); see isRecordSpanRoot
+        // for what counts as a root. Anything else that propagates mid-trace
+        // is left to the processor, which suppresses it and re-parents its
+        // children, so downstream services don't inherit sampled=0.
         boolean askRecord = isRecordSpanRoot(parent, spanKind) || isDatabaseLeaf(spanKind, attributes);
-        if (askEnabled || askRecord) {
-            TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes, askRecord);
+        // traceSampleRatio decides new traces only: a span with no parent.
+        boolean askRatio = !parent.isValid() && !delegateAlwaysOff;
+        if (!enforce) {
+            askEnabled = false;
+            askRecord = false;
+        }
+        if (askEnabled || askRecord || askRatio) {
+            TelemetryPolicy.Need need = askRatio ? TelemetryPolicy.Need.ROOT
+                    : askRecord ? TelemetryPolicy.Need.SPAN : TelemetryPolicy.Need.GLOBAL;
+            TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes, need);
             if (decision != null) {
                 if (askEnabled && !decision.enabled()) {
                     return SamplingResult.drop();
@@ -115,9 +169,54 @@ final class FlagAwareSampler implements Sampler {
                 if (askRecord && decision.enabled() && !decision.record()) {
                     return SamplingResult.drop();
                 }
+                if (askRatio && decision.overridesSampleRatio()) {
+                    return sampledByRatio(traceId, decision.sampleRatio())
+                            ? SamplingResult.recordAndSample() : SamplingResult.drop();
+                }
             }
         }
+        // While a ratio is in play, a span with a parent follows its parent
+        // (ParentBased semantics), whatever the delegate would do: otherwise a
+        // non-parent-based delegate (always_on, traceidratio, jaeger_remote)
+        // would re-decide the children of a root the ratio decided, and break
+        // the trace. With no ratio in play the delegate decides as always -
+        // and an always_off delegate is a hard floor no flag can lift.
+        if (parent.isValid() && !delegateAlwaysOff && sampleRatioInPlay()) {
+            return parent.isSampled() ? SamplingResult.recordAndSample() : SamplingResult.drop();
+        }
         return delegate.shouldSample(parentContext, traceId, name, spanKind, attributes, parentLinks);
+    }
+
+    /**
+     * The same decision as the SDK's {@code TraceIdRatioBasedSampler} - the
+     * lower 64 bits of the trace id against {@code ratio * Long.MAX_VALUE} - so
+     * a Java service applying the ratio and one using
+     * {@code OTEL_TRACES_SAMPLER=traceidratio} agree on every trace. Computed
+     * inline: a ratio targeted per span would otherwise build a new sampler
+     * on most roots.
+     */
+    static boolean sampledByRatio(String traceId, double ratio) {
+        long bound = ratio <= 0.0 ? Long.MIN_VALUE
+                : ratio >= 1.0 ? Long.MAX_VALUE
+                : (long) (ratio * Long.MAX_VALUE);
+        return Math.abs(lower64(traceId)) < bound;
+    }
+
+    /** The lower 64 bits of a 32-hex-digit trace id, as the SDK reads them. */
+    private static long lower64(String traceId) {
+        long value = 0;
+        for (int i = 16; i < 32; i++) {
+            value = (value << 4) | Character.digit(traceId.charAt(i), 16);
+        }
+        return value;
+    }
+
+    private boolean sampleRatioInPlay() {
+        try {
+            return policy.sampleRatioInPlay();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**
@@ -175,20 +274,19 @@ final class FlagAwareSampler implements Sampler {
     /**
      * The policy for this span, or {@code null} to delegate (fail open).
      *
-     * @param needRecord whether {@code recordSpan} matters for this decision;
-     *     when it doesn't (a child of an unsampled parent, say), only the global
-     *     switches are asked, so a targeted recordSpan is not evaluated for
-     *     spans it could not drop anyway
+     * @param need which flags matter for this decision: only the global
+     *     switches for a child of an unsampled parent, {@code recordSpan} too
+     *     for a root or a DB leaf, and {@code traceSampleRatio} only for a root,
+     *     so a targeted flag is never evaluated for spans it cannot affect
      */
     private TelemetryPolicy policyFor(
-            String traceId, String name, SpanKind kind, Attributes attributes, boolean needRecord) {
+            String traceId, String name, SpanKind kind, Attributes attributes, TelemetryPolicy.Need need) {
         try {
-            TelemetryPolicy cached = needRecord ? policy.cachedPolicy() : policy.cachedGlobalPolicy();
+            TelemetryPolicy cached = policy.cachedPolicy(need);
             if (cached != null) {
                 return cached;
             }
-            SpanStart span = new SpanStart(traceId, name, kind, attributes, null);
-            return needRecord ? policy.policy(span) : policy.globalPolicy(span);
+            return policy.policy(new SpanStart(traceId, name, kind, attributes, null), need);
         } catch (Throwable t) {
             // The source is not supposed to throw; if it does anyway, tracing
             // stays as the delegate would have it. Warn once, not per span.
@@ -202,7 +300,8 @@ final class FlagAwareSampler implements Sampler {
 
     @Override
     public String getDescription() {
-        return "FlagAwareSampler{delegate=" + delegate.getDescription() + "}";
+        return "FlagAwareSampler{delegate=" + delegate.getDescription()
+                + ", enforcement=" + (enforce ? "sampler" : "processor") + "}";
     }
 
     @Override
