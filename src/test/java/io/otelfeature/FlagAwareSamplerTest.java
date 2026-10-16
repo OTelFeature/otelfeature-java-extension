@@ -487,4 +487,21 @@ class FlagAwareSamplerTest {
         assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT,
                 Attributes.of(AttributeKey.stringKey("db.system.name"), "aws.dynamodb")));
     }
+
+    @Test
+    @DisplayName("recordSpan roots: no parent, or a SERVER/CONSUMER span with a remote parent")
+    void recordSpanRoots() {
+        SpanContext remote = SpanContext.createFromRemoteParent(
+                "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331",
+                TraceFlags.getSampled(), TraceState.getDefault());
+        SpanContext local = SpanContext.create(
+                "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331",
+                TraceFlags.getSampled(), TraceState.getDefault());
+        for (SpanKind kind : SpanKind.values()) {
+            assertTrue(FlagAwareSampler.isRecordSpanRoot(SpanContext.getInvalid(), kind));
+            assertEquals(kind == SpanKind.SERVER || kind == SpanKind.CONSUMER,
+                    FlagAwareSampler.isRecordSpanRoot(remote, kind), kind.name());
+            assertFalse(FlagAwareSampler.isRecordSpanRoot(local, kind), kind.name());
+        }
+    }
 }

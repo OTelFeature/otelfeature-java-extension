@@ -50,7 +50,8 @@ import java.util.logging.Logger;
  *       was already sampled when the flag flipped finishes coherently instead
  *       of losing its tail.</li>
  *   <li>{@code recordSpan=false} for this span: {@code DROP} it if it is a
- *       trace root (a span with no parent at all) or a
+ *       root (no parent, or a {@code SERVER}/{@code CONSUMER} entry span with
+ *       a remote parent - see {@link #isRecordSpanRoot}) or a
  *       database client leaf ({@code CLIENT} with a wire-protocol
  *       {@code db.system.name}); any other span - including a request that
  *       arrives with a sampled {@code traceparent} - is left to
@@ -104,7 +105,7 @@ final class FlagAwareSampler implements Sampler {
         // traceparent - is left to the processor, which suppresses it and
         // re-parents its children, so downstream services never inherit
         // sampled=0.
-        boolean askRecord = isRecordSpanRoot(parent) || isDatabaseLeaf(spanKind, attributes);
+        boolean askRecord = isRecordSpanRoot(parent, spanKind) || isDatabaseLeaf(spanKind, attributes);
         if (askEnabled || askRecord) {
             TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes, askRecord);
             if (decision != null) {
@@ -120,14 +121,24 @@ final class FlagAwareSampler implements Sampler {
     }
 
     /**
-     * Whether a span counts as a trace root for {@code recordSpan}: one with no
-     * parent at all. A span with a remote parent - sampled or not - is left
-     * to the processor for now; whether an unsampled remote parent should
-     * count as a root too is an open decision, and this is the one place to
-     * change it.
+     * Whether a span counts as a root for {@code recordSpan}: one with no
+     * parent at all, or an <em>entry</em> span - {@code SERVER} or
+     * {@code CONSUMER} - with a remote parent, sampled or not. Dropping an
+     * entry span drops the whole request in this service; the trace then
+     * ends at the caller, and downstream services get {@code sampled=0}.
+     * That is the intended trade-off for, say, a health check proxied with a
+     * sampled {@code traceparent}. {@code INTERNAL} and {@code CLIENT} spans
+     * with a remote parent are not roots: they stay with the processor.
+     *
+     * @param parent the parent span context ({@link SpanContext#getInvalid()} for none)
+     * @param kind the span's kind
+     * @return {@code true} if dropping the span means dropping its request
      */
-    static boolean isRecordSpanRoot(SpanContext parent) {
-        return !parent.isValid();
+    static boolean isRecordSpanRoot(SpanContext parent, SpanKind kind) {
+        if (parent == null || !parent.isValid()) {
+            return true;
+        }
+        return parent.isRemote() && (kind == SpanKind.SERVER || kind == SpanKind.CONSUMER);
     }
 
     /**

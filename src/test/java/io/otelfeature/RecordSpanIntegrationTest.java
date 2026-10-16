@@ -317,43 +317,81 @@ class RecordSpanIntegrationTest {
         return io.opentelemetry.context.Context.root().with(Span.wrap(upstream));
     }
 
-    @Test
-    @DisplayName("sampler mode: a request arriving with a sampled traceparent is not DROPped")
-    void sampledRemoteParentIsLeftToTheProcessor() throws IOException {
-        start(Enforcement.SAMPLER, flags(GLOBAL_ON, API_WEATHER));
-
-        Span server = tracer("tomcat").spanBuilder("GET /api/weather").setSpanKind(SpanKind.SERVER)
-                .setParent(incoming(true)).setAttribute("url.path", "/api/weather").startSpan();
-        Span call;
-        try (var s = server.makeCurrent()) {
-            call = tracer("http").spanBuilder("GET geocode").setSpanKind(SpanKind.CLIENT).startSpan();
-            call.end();
+    /** A health check behind a proxy that forwards its sampled traceparent. */
+    private Span[] proxiedHealthCheck() {
+        Span server = tracer("tomcat").spanBuilder("GET /health").setSpanKind(SpanKind.SERVER)
+                .setParent(incoming(true)).setAttribute("url.path", "/health").startSpan();
+        Span internal;
+        Span client;
+        try (var s1 = server.makeCurrent()) {
+            internal = tracer("spring").spanBuilder("HealthController.check").startSpan();
+            try (var s2 = internal.makeCurrent()) {
+                client = tracer("jdbc").spanBuilder("SELECT 1").setSpanKind(SpanKind.CLIENT)
+                        .setAttribute("db.system.name", "postgresql").startSpan();
+                client.end();
+            }
+            internal.end();
         }
         server.end();
+        return new Span[] {server, internal, client};
+    }
 
-        assertTrue(server.getSpanContext().isSampled(), "the trace is upstream's: it must stay sampled");
-        assertTrue(call.getSpanContext().isSampled(), "so downstream still records it");
-        assertEquals(List.of("GET geocode"), exported(), "the matching span itself is suppressed");
-        assertEquals("b7ad6b7169203331", byName().get("GET geocode").getParentSpanId(),
-                "and its child re-parented to the upstream caller");
+    @ParameterizedTest
+    @EnumSource(Enforcement.class)
+    @DisplayName("a proxied health check (sampled incoming traceparent) leaves no spans in this service")
+    void proxiedHealthCheckLeavesNoSpans(Enforcement mode) throws IOException {
+        start(mode, flags(GLOBAL_ON, HEALTH));
+
+        Span[] spans = proxiedHealthCheck();
+
+        assertEquals(List.of(), exported(), "the whole request goes, subtree included");
+        if (mode == Enforcement.SAMPLER) {
+            assertEquals(0, counting.onStartCount.get(), "the entry span is DROPped: nothing is recorded");
+            assertTrue(!spans[2].getSpanContext().isSampled(),
+                    "the trade-off: the trace ends at the caller, downstream gets sampled=0");
+        }
     }
 
     @Test
-    @DisplayName("sampler mode: a remote parent is not a root (for now), even unsampled: left to the processor")
-    void unsampledRemoteParentIsNotARoot() throws IOException {
+    @DisplayName("processor mode: a dropped root takes its whole local subtree, not just itself")
+    void processorModeDropsTheSubtree() throws IOException {
+        start(Enforcement.PROCESSOR, flags(GLOBAL_ON, HEALTH));
+
+        Span server = tracer("tomcat").spanBuilder("GET /health").setSpanKind(SpanKind.SERVER)
+                .setAttribute("url.path", "/health").startSpan();
+        try (var s = server.makeCurrent()) {
+            tracer("jdbc").spanBuilder("SELECT 1").setSpanKind(SpanKind.CLIENT)
+                    .setAttribute("db.system.name", "postgresql").startSpan().end();
+        }
+        server.end();
+        weatherRequest();
+
+        assertEquals(List.of("GET geocode", "SELECT forecast", "GET /weather"), exported(),
+                "nothing of the health check, not even its children; other requests untouched");
+    }
+
+    @Test
+    @DisplayName("sampler mode: an INTERNAL span with a remote parent is not a root: left to the processor")
+    void remoteParentedInternalSpanGoesToTheProcessor() throws IOException {
         start(Enforcement.SAMPLER, flags(GLOBAL_ON, API_WEATHER));
-        // An always-on delegate, so a delegate decision could not explain the drop.
-        tracerProvider.shutdown();
-        tracerProvider = SdkTracerProvider.builder()
-                .setSampler(new FlagAwareSampler(Sampler.alwaysOn(), policy))
-                .addSpanProcessor(counting)
-                .build();
 
-        tracer("tomcat").spanBuilder("GET /api/weather").setSpanKind(SpanKind.SERVER)
-                .setParent(incoming(false)).setAttribute("url.path", "/api/weather").startSpan().end();
+        Span internal = tracer("worker").spanBuilder("process").setSpanKind(SpanKind.INTERNAL)
+                .setParent(incoming(true)).setAttribute("url.path", "/api/weather").startSpan();
+        internal.end();
 
-        assertEquals(1, counting.onStartCount.get(),
-                "only a span with no parent is a recordSpan root; see FlagAwareSampler.isRecordSpanRoot");
+        assertTrue(internal.getSpanContext().isSampled(), "not DROPped: it is not an entry span");
+        assertEquals(List.of(), exported(), "but suppressed by the processor");
+    }
+
+    @Test
+    @DisplayName("sampler mode: a CONSUMER span with a remote parent is an entry span, and is DROPped")
+    void remoteParentedConsumerIsARoot() throws IOException {
+        start(Enforcement.SAMPLER, flags(GLOBAL_ON, API_WEATHER));
+
+        tracer("kafka").spanBuilder("weather.requests process").setSpanKind(SpanKind.CONSUMER)
+                .setParent(incoming(true)).setAttribute("url.path", "/api/weather").startSpan().end();
+
+        assertEquals(0, counting.onStartCount.get());
     }
 
     @ParameterizedTest

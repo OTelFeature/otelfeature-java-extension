@@ -81,6 +81,16 @@ public class FilteringSpanProcessor implements SpanProcessor {
         //
         // This is also where the decision is taken for the span's whole
         // lifetime: onEnd reads the registry instead of the flag.
+        SpanContext parent = span.getParentSpanContext();
+        boolean localParent = parent != null && parent.isValid() && !parent.isRemote();
+        // A span inside a request recordSpan dropped as a whole goes with it,
+        // without asking any flag: the request was decided at its root.
+        if (localParent && registry.suppressesSubtree(parent.getSpanId())) {
+            registry.record(span.getSpanContext().getSpanId(), parent, true);
+            delegate.onStart(parentContext, span);
+            return;
+        }
+
         // Static flags answer without the span: getAttributes() copies the
         // span's attributes under its lock, so it is only read when a flag
         // actually has to be evaluated.
@@ -94,13 +104,17 @@ public class FilteringSpanProcessor implements SpanProcessor {
                     span.getInstrumentationScopeInfo()));
         }
         if (decision.suppresses(span.getKind())) {
-            SpanContext parent = span.getParentSpanContext();
-            // A suppressed root span is recorded against an invalid parent, so
-            // onEnd can still find it and its children are promoted to roots
-            // rather than pointing at a span that was never exported.
-            registry.record(
-                    span.getSpanContext().getSpanId(),
-                    parent != null && parent.isValid() ? parent : SpanContext.getInvalid());
+            SpanContext recordedParent = parent != null && parent.isValid() ? parent : SpanContext.getInvalid();
+            // recordSpan=false on a root (no parent, or an entry span with a
+            // remote one) drops the whole request in this service, as the
+            // sampler would: its local subtree is suppressed with it. Anything
+            // else - IO, OFF, recordSpan mid-trace - suppresses just this span,
+            // and its children are re-parented. A suppressed root is recorded
+            // against an invalid parent, so its surviving children are
+            // promoted to roots rather than pointing at a span nobody exported.
+            boolean subtree = !decision.record()
+                    && FlagAwareSampler.isRecordSpanRoot(recordedParent, span.getKind());
+            registry.record(span.getSpanContext().getSpanId(), recordedParent, subtree);
         }
         delegate.onStart(parentContext, span);
     }

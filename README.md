@@ -74,11 +74,17 @@ Either way, the decision is made once, when the span starts.
 
 | | `processor` mode | `sampler` mode |
 |---|---|---|
-| a trace root (no parent at all, e.g. a health-check probe) | suppressed (dropped at `onEnd`); children re-parented | `DROP`: never recorded, the whole trace goes |
-| a request arriving with a `traceparent` (sampled or not) | suppressed; children re-parented | suppressed by the processor, **not** dropped: it is the upstream's trace, and dropping it would send `sampled=0` on to every service below |
+| a root: no parent (a health-check probe), or an **entry** span (`SERVER`/`CONSUMER`) with a remote parent, sampled or not (a health check behind a proxy that forwards `traceparent`) | suppressed **with its whole local subtree**: the request leaves no spans in this service | `DROP`: never recorded, nor is anything under it |
+| an `INTERNAL` or `CLIENT` span with a remote parent | suppressed; children re-parented | suppressed by the processor, not dropped |
 | a database call over its own wire protocol (`CLIENT` with `db.system.name` `postgresql`, `mysql`, `redis`, `mongodb`, …; or the deprecated `db.system`) | suppressed | `DROP`: never recorded |
 | a database reached over HTTP (`elasticsearch`, `aws.dynamodb`, …), or any other span that propagates mid-trace | suppressed; children re-parented | suppressed by the processor, not dropped, so downstream services don't inherit `sampled=0` |
 | a rule on `otel.scope.*` (e.g. the JDBC instrumentation) | applies | applies, but at the processor: a sampler is not told the scope |
+
+**The trade-off of dropping an entry span with a remote parent:** the trace
+ends at the caller. In `sampler` mode the request's outgoing calls carry
+`sampled=0`, so downstream services drop their part too. In `processor` mode
+the spans are created and propagated as `sampled=1` before being suppressed, so
+a downstream service that still traces exports its spans with a missing parent.
 
 Caveats for `sampler` mode:
 
