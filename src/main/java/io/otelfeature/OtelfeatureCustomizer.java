@@ -18,6 +18,7 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import java.util.logging.Logger;
 
 /**
  * SPI entry point for the otelfeature-java-extension.
@@ -55,8 +56,19 @@ import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
  */
 public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvider {
 
+    private static final Logger log = Logger.getLogger(OtelfeatureCustomizer.class.getName());
+
     @Override
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
+        // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
+        // never enable what the environment turned off. Autoconfigure still
+        // calls customizers when the SDK is disabled (it then builds a no-op
+        // SDK and ignores them), so don't even open a connection to flagd.
+        if (!TelemetryPolicy.startupDefaults().enabled()) {
+            log.info("otelfeature-java-extension: OTEL_SDK_DISABLED is set - not installing;"
+                    + " flags never enable what OTEL_SDK_DISABLED turned off");
+            return;
+        }
         FlagdTelemetryPolicy policy = new FlagdTelemetryPolicy();
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
 

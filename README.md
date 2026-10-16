@@ -43,6 +43,10 @@ extension. That means `enabled = true` (unless `OTEL_SDK_DISABLED` is set) and
 error all read as `FULL` / `true`. The failure is logged once, not once per
 span. Only traces are affected: metrics and logs carry on regardless.
 
+`OTEL_SDK_DISABLED=true` is a **hard floor**: flags never enable what
+`OTEL_SDK_DISABLED` turned off. The extension then installs nothing at all (not
+even a flagd connection), and the agent's disabled SDK exports nothing.
+
 > [!IMPORTANT]
 > **`OFF` is suppression, not an SDK disable.** In Java, spans are still
 > created, populated and propagated by the agent, then dropped in

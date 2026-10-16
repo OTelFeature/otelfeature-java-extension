@@ -56,6 +56,10 @@ import java.util.logging.Logger;
  *   <li>{@code suppressInternal} is {@code telemetryLevel == IO}.</li>
  * </ul>
  *
+ * <p>{@code OTEL_SDK_DISABLED=true} is a hard floor: the policy is then
+ * {@link TelemetryPolicy#DISABLED} whatever the flags say. Flags never enable
+ * what {@code OTEL_SDK_DISABLED} turned off.
+ *
  * <p>Whatever cannot be resolved - flagd unreachable, a missing flag, a wrong
  * type, an unknown variant - takes its field from
  * {@link TelemetryPolicy#startupDefaults()}, and the failure is logged once
@@ -84,6 +88,12 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     private final TelemetryFlag<String, TelemetryLevel> levelFlag;
     private final TelemetryFlag<Boolean, Boolean> enabledFlag;
 
+    /**
+     * {@code false} when the startup defaults disable the SDK: a hard floor no
+     * flag can lift.
+     */
+    private final boolean floorEnabled;
+
     public FlagdTelemetryPolicy() {
         this(env("OTELFEATURE_FLAG_NAME", "telemetryLevel"),
                 env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled"),
@@ -110,6 +120,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         this.api = OpenFeatureAPI.createIsolated();
         Client client = api.getClient();
 
+        this.floorEnabled = defaults.enabled();
         TelemetryLevel defaultLevel = TelemetryLevel.of(defaults);
         this.levelFlag = new TelemetryFlag<>(
                 levelFlagKey,
@@ -168,6 +179,11 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
 
     @Override
     public TelemetryPolicy policy() {
+        // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
+        // they never enable what the environment turned off.
+        if (!floorEnabled) {
+            return TelemetryPolicy.DISABLED;
+        }
         // The kill switch first: while it is off, telemetryLevel is not asked.
         if (!enabledFlag.value()) {
             return TelemetryPolicy.DISABLED;

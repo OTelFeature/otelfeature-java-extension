@@ -283,7 +283,7 @@ class FlagdTelemetryPolicyIntegrationTest {
     }
 
     @Test
-    @DisplayName("each field falls back to its own startup default; flags override the floor")
+    @DisplayName("a disabled SDK is a hard floor: flags saying on don't re-enable tracing")
     void fieldsFallBackToStartupDefaults() throws IOException {
         telemetryLevel.shutdown();
         // otelEnabled=true, telemetryLevel missing, startup defaults "disabled".
@@ -307,8 +307,10 @@ class FlagdTelemetryPolicyIntegrationTest {
                 "the missing telemetryLevel keeps its share of the 'disabled' floor");
 
         write(staticFlags("full", "on"));
-        assertTrue(waitFor(() -> telemetryLevel.policy() == TelemetryPolicy.FULL),
-                "once both flags say so, they override the floor");
+        assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL),
+                "the new ruleset never reached the extension");
+        assertEquals(TelemetryPolicy.DISABLED, telemetryLevel.policy(),
+                "OTEL_SDK_DISABLED is a hard floor: flags never enable what it turned off");
     }
 
     private void write(String json) throws IOException {

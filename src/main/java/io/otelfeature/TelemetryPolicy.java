@@ -82,13 +82,14 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal) {
      *
      * <p>This is what every field resolves to while flagd is unreachable, a flag
      * is missing, or it holds a value we cannot read - so that installing the
-     * extension changes nothing until someone deliberately sets a flag. Flags
-     * are a live override of this floor, never a replacement for it.
+     * extension changes nothing until someone deliberately sets a flag.
      *
      * <ul>
      *   <li>{@code enabled} - {@code false} only if {@code OTEL_SDK_DISABLED}
-     *       (or {@code -Dotel.sdk.disabled}) is {@code true}. In practice the
-     *       agent then never loads this extension, so this is {@code true}.</li>
+     *       (or {@code -Dotel.sdk.disabled}) is {@code true}, and then it is a
+     *       <b>hard floor</b>: flags never enable what {@code OTEL_SDK_DISABLED}
+     *       turned off. Autoconfigure still calls this extension's customizer
+     *       in that case, which then installs nothing.</li>
      *   <li>{@code suppressInternal} - {@code false}: the stock agent has no
      *       setting for it.</li>
      * </ul>
