@@ -164,4 +164,67 @@ class EvaluationContextFactoryTest {
         assertNull(context.getValue("service"));
         assertEquals("server", at(context, "span.kind").asString());
     }
+
+    @Test
+    @DisplayName("a start attribute loses to a resource attribute of the same name (parity with Python)")
+    void resourceWinsOverStartAttribute() {
+        EvaluationContext context = factory().build(serverSpan(Attributes.of(
+                AttributeKey.stringKey("service.name"), "spoofed")));
+
+        assertEquals("weather", at(context, "service.name").asString());
+    }
+
+    @Test
+    @DisplayName("a namespace shared with the resource keeps both sides")
+    void sharedNamespaceKeepsBoth() {
+        EvaluationContext context = factory().build(serverSpan(Attributes.of(
+                AttributeKey.stringKey("service.instance.id"), "pod-7")));
+
+        assertEquals("pod-7", at(context, "service.instance.id").asString());
+        assertEquals("weather", at(context, "service.name").asString());
+        assertEquals("demo", at(context, "service.namespace").asString());
+    }
+
+    @Test
+    @DisplayName("collision across sources: the namespace wins, whichever side holds the leaf")
+    void namespaceWinsAcrossSources() {
+        EvaluationContextFactory leafInResource = new EvaluationContextFactory();
+        leafInResource.setResource(Resource.create(Attributes.of(
+                AttributeKey.stringKey("deployment.environment"), "prod")));
+        EvaluationContext first = leafInResource.build(serverSpan(Attributes.of(
+                AttributeKey.stringKey("deployment.environment.name"), "staging")));
+        assertEquals("staging", at(first, "deployment.environment.name").asString());
+
+        EvaluationContextFactory namespaceInResource = new EvaluationContextFactory();
+        namespaceInResource.setResource(Resource.create(Attributes.of(
+                AttributeKey.stringKey("deployment.environment.name"), "prod")));
+        EvaluationContext second = namespaceInResource.build(serverSpan(Attributes.of(
+                AttributeKey.stringKey("deployment.environment"), "legacy")));
+        assertEquals("prod", at(second, "deployment.environment.name").asString());
+    }
+
+    @Test
+    @DisplayName("edge keys: empty segments collapse, nameless keys are left out")
+    void edgeKeys() {
+        Map<String, Object> tree = new LinkedHashMap<>();
+        EvaluationContextFactory.insert(tree, ".a", "1");
+        EvaluationContextFactory.insert(tree, "b.", "2");
+        EvaluationContextFactory.insert(tree, "c..d", "3");
+        EvaluationContextFactory.insert(tree, "", "4");
+        EvaluationContextFactory.insert(tree, ".", "5");
+
+        assertEquals(Map.of("a", "1", "b", "2", "c", Map.of("d", "3")), tree);
+    }
+
+    @Test
+    @DisplayName("the shared resource structures cannot be modified through a context")
+    void sharedStructuresAreSealed() {
+        EvaluationContextFactory factory = factory();
+        EvaluationContext context = factory.build(serverSpan(Attributes.empty()));
+
+        Value service = context.getValue("service");
+        org.junit.jupiter.api.Assertions.assertThrows(UnsupportedOperationException.class,
+                () -> ((dev.openfeature.sdk.MutableStructure) service.asStructure()).add("name", "hijacked"));
+        assertEquals("weather", at(factory.build(serverSpan(Attributes.empty())), "service.name").asString());
+    }
 }

@@ -439,4 +439,35 @@ class FlagAwareSamplerTest {
     void unsetEnforcementIsProcessor() {
         assertEquals(Enforcement.PROCESSOR, Enforcement.parse(null));
     }
+
+    @Test
+    @DisplayName("a root decision reaches the policy with trace id, name, kind and attributes (no scope)")
+    void samplerHandsTheSpanToThePolicy() {
+        FilteringSpanProcessorTest.CapturingPolicy capturing = new FilteringSpanProcessorTest.CapturingPolicy(null);
+        Attributes start = Attributes.of(AttributeKey.stringKey("url.path"), "/health");
+
+        new FlagAwareSampler(Sampler.alwaysOn(), capturing).shouldSample(
+                Context.root(), "0af7651916cd43dd8448eb211c80319c", "GET /health", SpanKind.SERVER,
+                start, List.of());
+
+        assertEquals(1, capturing.seen.size());
+        SpanStart span = capturing.seen.get(0);
+        assertEquals("0af7651916cd43dd8448eb211c80319c", span.traceId());
+        assertEquals("GET /health", span.name());
+        assertEquals(SpanKind.SERVER, span.kind());
+        assertEquals(start, span.attributes());
+        assertEquals(null, span.scope(), "a Sampler is not told the scope");
+    }
+
+    @Test
+    @DisplayName("a span-independent policy answers the sampler without a SpanStart")
+    void samplerUsesCachedPolicy() {
+        FilteringSpanProcessorTest.CapturingPolicy capturing =
+                new FilteringSpanProcessorTest.CapturingPolicy(TelemetryPolicy.DISABLED);
+
+        assertEquals(SamplingDecision.DROP, new FlagAwareSampler(Sampler.alwaysOn(), capturing).shouldSample(
+                Context.root(), "0af7651916cd43dd8448eb211c80319c", "root", SpanKind.SERVER,
+                Attributes.empty(), List.of()).getDecision());
+        assertTrue(capturing.seen.isEmpty());
+    }
 }

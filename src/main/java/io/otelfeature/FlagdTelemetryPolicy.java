@@ -182,13 +182,13 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
     }
 
     @Override
-    public TelemetryPolicy policy(SpanStart span) {
+    public TelemetryPolicy cachedPolicy() {
         // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
         // they never enable what the environment turned off.
         if (!floorEnabled) {
             return TelemetryPolicy.DISABLED;
         }
-        // Static flags first, without building anything: two volatile reads.
+        // Static flags, without building anything: two volatile reads.
         Boolean enabled = enabledFlag.cachedDecision();
         if (enabled != null) {
             if (!enabled) {
@@ -198,6 +198,15 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
             if (level != null) {
                 return of(level);
             }
+        }
+        return null;
+    }
+
+    @Override
+    public TelemetryPolicy policy(SpanStart span) {
+        TelemetryPolicy cached = cachedPolicy();
+        if (cached != null) {
+            return cached;
         }
         // At least one flag must be evaluated: build the span's context once,
         // on first use, and share it between the two.

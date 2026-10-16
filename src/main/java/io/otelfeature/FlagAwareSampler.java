@@ -87,15 +87,19 @@ final class FlagAwareSampler implements Sampler {
         // non-parent-based delegate may then sample the rest of a trace whose
         // root was dropped.
         if ((localRoot || !parent.isSampled())
-                && !enabled(new SpanStart(traceId, name, spanKind, attributes, null))) {
+                && !enabled(traceId, name, spanKind, attributes)) {
             return SamplingResult.drop();
         }
         return delegate.shouldSample(parentContext, traceId, name, spanKind, attributes, parentLinks);
     }
 
-    private boolean enabled(SpanStart span) {
+    private boolean enabled(String traceId, String name, SpanKind kind, Attributes attributes) {
         try {
-            return policy.policy(span).enabled();
+            TelemetryPolicy cached = policy.cachedPolicy();
+            if (cached != null) {
+                return cached.enabled();
+            }
+            return policy.policy(new SpanStart(traceId, name, kind, attributes, null)).enabled();
         } catch (Throwable t) {
             // The source is not supposed to throw; if it does anyway, tracing
             // stays as the delegate would have it. Warn once, not per span.

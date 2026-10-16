@@ -30,7 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -62,8 +62,14 @@ import java.util.logging.Logger;
  * sent. When a name is both a leaf and a namespace (a deprecated name next to
  * its replacement, such as {@code db.system} and {@code db.system.name}), the
  * namespace wins and the leaf is dropped, whatever order they arrive in. For
- * the same leaf from two sources, later sources win: resource, then scope,
- * then span attributes, then {@code span.kind}/{@code span.name}.
+ * the same leaf from two sources, the extension's own keys win over a span
+ * start attribute of the same name (the same rule as the Python extension):
+ * start attributes, then resource, then scope, then
+ * {@code span.kind}/{@code span.name}.
+ *
+ * <p>Empty dot segments collapse ({@code .a} and {@code a.} are {@code a},
+ * {@code a..b} is {@code a.b}); a key with no segment at all ({@code ""},
+ * {@code "."}) is left out. Both are logged at FINE.
  *
  * <p>The resource part is built once, when the resource is known; the per-span
  * part only when a flag is not static and actually has to be evaluated.
@@ -83,8 +89,8 @@ final class EvaluationContextFactory {
 
     private volatile Base base = Base.EMPTY;
 
-    /** How many contexts have been built. For tests. */
-    private final AtomicLong builds = new AtomicLong();
+    /** How many contexts have been built. For tests; uncontended on the span path. */
+    private final LongAdder builds = new LongAdder();
 
     /**
      * Captures the process-wide part of the context.
@@ -108,62 +114,72 @@ final class EvaluationContextFactory {
      * Builds the context for one span.
      *
      * <p>Only the span's own part is built here; the resource part is shared,
-     * already finished, between all contexts. A span key that shares a
-     * top-level namespace with the resource (say a {@code service.*} start
-     * attribute) gets that namespace rebuilt with both, resource first.
+     * already finished, between all contexts. A namespace the span's keys share
+     * with the resource (say a {@code service.*} start attribute) is rebuilt
+     * with both, and the resource's values win.
      *
      * @param span the span as it starts
      * @return a nested evaluation context keyed by the trace id
      */
     EvaluationContext build(SpanStart span) {
-        builds.incrementAndGet();
+        builds.increment();
         Base b = base;
+        Map<String, Object> tree = new LinkedHashMap<>();
 
-        // The span's pairs, lowest precedence first.
-        List<Map.Entry<String, Object>> pairs = new ArrayList<>(span.attributes() == null
-                ? 4 : span.attributes().size() + 4);
-        InstrumentationScopeInfo scope = span.scope();
-        if (scope != null) {
-            pairs.add(Map.entry("otel.scope.name", scope.getName()));
-            if (scope.getVersion() != null) {
-                pairs.add(Map.entry("otel.scope.version", scope.getVersion()));
-            }
-        }
+        // 1. Start attributes: the lowest precedence.
         Attributes attributes = span.attributes();
         if (attributes != null) {
-            attributes.forEach((key, value) -> {
-                if (value != null) {
-                    pairs.add(Map.entry(key.getKey(), value));
-                }
-            });
-        }
-        if (span.kind() != null) {
-            pairs.add(Map.entry("span.kind", span.kind().name().toLowerCase(Locale.ROOT)));
-        }
-        if (span.name() != null) {
-            pairs.add(Map.entry("span.name", span.name()));
+            attributes.forEach((key, value) -> insert(tree, key.getKey(), value));
         }
 
-        Map<String, Object> tree = new LinkedHashMap<>();
+        // 2. The resource, wherever the span shares a namespace with it.
+        //    Elsewhere the shared, pre-built resource values are used as-is.
         if (!b.byTop().isEmpty()) {
-            for (Map.Entry<String, Object> pair : pairs) {
-                String top = topSegment(pair.getKey());
-                List<Map.Entry<String, Object>> shared = top == null ? null : b.byTop().get(top);
-                if (shared != null && !tree.containsKey(top)) {
-                    for (Map.Entry<String, Object> resourcePair : shared) {
-                        insert(tree, resourcePair.getKey(), resourcePair.getValue());
-                    }
+            for (String top : sharedTops(tree, b)) {
+                for (Map.Entry<String, Object> pair : b.byTop().get(top)) {
+                    insert(tree, pair.getKey(), pair.getValue());
                 }
             }
         }
-        for (Map.Entry<String, Object> pair : pairs) {
-            insert(tree, pair.getKey(), pair.getValue());
+
+        // 3. Scope and span keys: the extension's own, highest precedence.
+        InstrumentationScopeInfo scope = span.scope();
+        if (scope != null) {
+            insert(tree, "otel.scope.name", scope.getName());
+            if (scope.getVersion() != null) {
+                insert(tree, "otel.scope.version", scope.getVersion());
+            }
+        }
+        if (span.kind() != null) {
+            insert(tree, "span.kind", span.kind().name().toLowerCase(Locale.ROOT));
+        }
+        if (span.name() != null) {
+            insert(tree, "span.name", span.name());
         }
 
         Map<String, Value> values = new HashMap<>(b.values());
         values.putAll(toValues(tree));
         return new MutableContext(span.traceId(), values);
     }
+
+    /** The resource namespaces this span's keys will touch: its start attributes', and ours. */
+    private static List<String> sharedTops(Map<String, Object> tree, Base b) {
+        List<String> tops = new ArrayList<>(2);
+        for (String top : tree.keySet()) {
+            if (b.byTop().containsKey(top)) {
+                tops.add(top);
+            }
+        }
+        for (String own : OWN_TOPS) {
+            if (b.byTop().containsKey(own) && !tree.containsKey(own)) {
+                tops.add(own);
+            }
+        }
+        return tops;
+    }
+
+    /** Top-level namespaces of the keys this extension adds itself. */
+    private static final List<String> OWN_TOPS = List.of("otel", "span");
 
     /** The first non-empty dot segment of a key, or {@code null} if there is none. */
     private static String topSegment(String key) {
@@ -218,6 +234,10 @@ final class EvaluationContextFactory {
             start = dot + 1;
         }
         if (pending == null) {
+            if (log.isLoggable(Level.FINE)) {
+                log.fine("otelfeature-java-extension: attribute key '" + key
+                        + "' has no name segment - left out of the context");
+            }
             return;
         }
         if (node.get(pending) instanceof Map) {
@@ -269,9 +289,11 @@ final class EvaluationContextFactory {
     private static Value toValue(Object value) {
         if (value instanceof Map<?, ?> map) {
             // MutableStructure keeps the map it is given; ImmutableStructure
-            // would deep-copy it again at every level of nesting. Nothing
-            // mutates these after they are built.
-            return new Value(new MutableStructure(toValues((Map<String, Object>) map)));
+            // would deep-copy it again at every level of nesting. The map is
+            // unmodifiable, so a hook that casts and calls add() fails instead
+            // of changing the resource part every later context shares.
+            return new Value(new MutableStructure(
+                    Collections.unmodifiableMap(toValues((Map<String, Object>) map))));
         }
         if (value instanceof String s) {
             return new Value(s);
@@ -297,6 +319,6 @@ final class EvaluationContextFactory {
 
     /** For tests: how many contexts have been built so far. */
     long builds() {
-        return builds.get();
+        return builds.sum();
     }
 }

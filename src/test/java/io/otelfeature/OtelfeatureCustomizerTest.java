@@ -83,4 +83,10 @@ class OtelfeatureCustomizerTest {
             logger.removeHandler(handler);
         }
     }
+
+    @Test
+    @DisplayName("runs after every other customizer provider, so the captured resource is final")
+    void runsLast() {
+        org.junit.jupiter.api.Assertions.assertEquals(Integer.MAX_VALUE, new OtelfeatureCustomizer().order());
+    }
 }

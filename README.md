@@ -249,15 +249,27 @@ every flagd evaluator (see
 authors write the semconv name verbatim, `{"var": "service.name"}`. If a name is
 both a value and a namespace (a deprecated name next to its replacement, such
 as `db.system` and `db.system.name`), the namespace wins and the value is left
-out. For the same name from two sources, the later source wins: resource, then
-scope, then span attributes, then `span.kind` / `span.name`.
+out, whichever source holds which. For the same name from two sources, the
+extension's own keys win over a span start attribute (the same rule as the
+Python extension): a start attribute named `service.name` cannot override the
+resource's. Empty dot segments collapse (`a..b` is `a.b`), and a key with no
+name at all is left out.
+
+One OpenFeature caveat: when the SDK merges contexts (API, client or hook
+contexts on top of this one), a key there replaces the **whole** top-level
+namespace of the same name. A hook that adds `{"service": {...}}` therefore
+removes `service.name` from the evaluation. This extension uses an isolated
+OpenFeature API and adds no such contexts itself.
 
 **Only what exists at span start.** `http.route` and `http.response.status_code`
 are **not** in the context: the agent sets them after the span has started, and
 the decision is made before that. Target `url.path` instead.
 
-**Cost.** A static flag never builds a context: the answer is two volatile
-reads (5–19 ns per span in the integration test, with no allocation). A
+**Cost.** A static flag never builds a context. Both the processor and the
+sampler ask the policy for its span-independent answer first, so they don't even
+read the span's attributes (which the SDK copies on every read). The answer is
+two volatile reads: 5–19 ns per span measured at `policy()` in the integration
+test, with no allocation. A
 targeted flag builds the context and evaluates the rule. With the three-condition
 rule above, that was 7.5–9.6 µs per span on a developer laptop (JDK 21, flagd
 `FILE` resolver), of which 2.5–3 µs was building the context and the rest was

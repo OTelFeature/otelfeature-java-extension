@@ -42,6 +42,21 @@ public interface TelemetryPolicySource {
      */
     TelemetryPolicy policy(SpanStart span);
 
+    /**
+     * The policy, if it does not depend on the span at all - every flag
+     * static, or tracing disabled outright.
+     *
+     * <p>Enforcement points ask this first, so that the common, static case
+     * builds nothing per span: not even the {@link SpanStart}, whose start
+     * attributes the SDK copies on every read.
+     *
+     * @return the span-independent policy, or {@code null} if
+     *     {@link #policy(SpanStart)} has to be asked
+     */
+    default TelemetryPolicy cachedPolicy() {
+        return null;
+    }
+
     /** Releases whatever backs this source. The default does nothing. */
     default void shutdown() {}
 }

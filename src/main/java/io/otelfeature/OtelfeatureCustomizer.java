@@ -64,6 +64,18 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
 
     private static final Logger log = Logger.getLogger(OtelfeatureCustomizer.class.getName());
 
+    /**
+     * Run after every other customizer provider, so the resource captured for
+     * the evaluation context is the final one - a distro or extension that
+     * adds {@code service.namespace} after us would otherwise be invisible to
+     * targeting rules. (A provider that also claims {@code Integer.MAX_VALUE}
+     * may still run after us.)
+     */
+    @Override
+    public int order() {
+        return Integer.MAX_VALUE;
+    }
+
     @Override
     public void customize(AutoConfigurationCustomizer autoConfiguration) {
         // OTEL_SDK_DISABLED is a hard floor: flags only ever reduce telemetry,
@@ -136,14 +148,8 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
     static TelemetryPolicySource processorPolicy(
             TelemetryPolicySource policy, Enforcement mode, BooleanSupplier samplerInstalled) {
         AtomicBoolean warned = new AtomicBoolean();
-        return span -> {
-            TelemetryPolicy p;
-            try {
-                p = policy.policy(span);
-            } catch (Throwable t) {
-                return TelemetryPolicy.FULL;
-            }
-            if (mode == Enforcement.PROCESSOR) {
+        java.util.function.UnaryOperator<TelemetryPolicy> view = p -> {
+            if (p == null || mode == Enforcement.PROCESSOR) {
                 return p;
             }
             if (!samplerInstalled.getAsBoolean()) {
@@ -155,6 +161,25 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
                 return p;
             }
             return TelemetryPolicy.of(true, !p.enabled() || p.suppressInternal());
+        };
+        return new TelemetryPolicySource() {
+            @Override
+            public TelemetryPolicy policy(SpanStart span) {
+                try {
+                    return view.apply(policy.policy(span));
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
+
+            @Override
+            public TelemetryPolicy cachedPolicy() {
+                try {
+                    return view.apply(policy.cachedPolicy());
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
         };
     }
 }

@@ -582,4 +582,67 @@ class FilteringSpanProcessorTest {
         assertEquals(1, registry.size());
         assertTrue(registry.isSuppressed("next"));
     }
+
+    // ----------------------------------------------------------------------
+    // What reaches the policy
+    // ----------------------------------------------------------------------
+
+    /** Records the SpanStart it is asked about; optionally answers from cache. */
+    static final class CapturingPolicy implements TelemetryPolicySource {
+        final List<SpanStart> seen = new ArrayList<>();
+        final TelemetryPolicy cached;
+
+        CapturingPolicy(TelemetryPolicy cached) {
+            this.cached = cached;
+        }
+
+        @Override
+        public TelemetryPolicy policy(SpanStart span) {
+            seen.add(span);
+            return TelemetryPolicy.FULL;
+        }
+
+        @Override
+        public TelemetryPolicy cachedPolicy() {
+            return cached;
+        }
+    }
+
+    @Test
+    @DisplayName("an evaluated span reaches the policy with its trace id, name, kind, attributes and scope")
+    void spanStartReachesThePolicy() {
+        CapturingPolicy capturing = new CapturingPolicy(null);
+        SdkTracerProvider provider = SdkTracerProvider.builder()
+                .addSpanProcessor(new FilteringSpanProcessor(new CountingProcessor(), capturing,
+                        new SuppressedSpanRegistry()))
+                .build();
+        Span span = provider.tracerBuilder("io.opentelemetry.tomcat-10.0").setInstrumentationVersion("2.10.0")
+                .build().spanBuilder("GET /health").setSpanKind(SpanKind.SERVER)
+                .setAttribute("url.path", "/health").startSpan();
+        span.end();
+        provider.shutdown();
+
+        assertEquals(1, capturing.seen.size());
+        SpanStart start = capturing.seen.get(0);
+        assertEquals(span.getSpanContext().getTraceId(), start.traceId());
+        assertEquals("GET /health", start.name());
+        assertEquals(SpanKind.SERVER, start.kind());
+        assertEquals("/health", start.attributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("url.path")));
+        assertEquals("io.opentelemetry.tomcat-10.0", start.scope().getName());
+        assertEquals("2.10.0", start.scope().getVersion());
+    }
+
+    @Test
+    @DisplayName("a span-independent policy is used without building a SpanStart")
+    void cachedPolicySkipsTheSpan() {
+        CapturingPolicy capturing = new CapturingPolicy(TelemetryPolicy.IO);
+        SdkTracerProvider provider = SdkTracerProvider.builder()
+                .addSpanProcessor(new FilteringSpanProcessor(new CountingProcessor(), capturing,
+                        new SuppressedSpanRegistry()))
+                .build();
+        provider.get("test").spanBuilder("x").startSpan().end();
+        provider.shutdown();
+
+        assertTrue(capturing.seen.isEmpty(), "policy(SpanStart) must not be asked when cachedPolicy answers");
+    }
 }
