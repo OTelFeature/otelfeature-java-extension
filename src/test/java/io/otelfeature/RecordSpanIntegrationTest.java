@@ -107,9 +107,19 @@ class RecordSpanIntegrationTest {
     private FilteringSpanProcessorTest.InMemoryExporter exporter;
     private FilteringSpanProcessorTest.CountingProcessor counting;
 
+    private Path file;
+    private long lastModified;
+
+    /** Rewrites the flag file, visibly newer than the last write (see FlagdTelemetryPolicyIntegrationTest). */
+    private void write(String json) throws IOException {
+        Files.writeString(file, json, StandardCharsets.UTF_8);
+        lastModified = Math.max(System.currentTimeMillis(), lastModified + 1000);
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(lastModified));
+    }
+
     private void start(Enforcement mode, String flagFile) throws IOException {
-        Path file = tempDir.resolve("flags.json");
-        Files.writeString(file, flagFile, StandardCharsets.UTF_8);
+        file = tempDir.resolve("flags.json");
+        write(flagFile);
         policy = new FlagdTelemetryPolicy("telemetryLevel", "otelEnabled", "recordSpan", TelemetryPolicy.FULL,
                 FlagdOptions.builder()
                         .resolverType(Config.Resolver.FILE)
@@ -293,5 +303,102 @@ class RecordSpanIntegrationTest {
             }
         }
         return false;
+    }
+
+    private static final String API_WEATHER = """
+            { "if": [ { "==": [ { "var": "url.path" }, "/api/weather" ] }, "off", null ] }""";
+
+    private static io.opentelemetry.context.Context incoming(boolean sampled) {
+        io.opentelemetry.api.trace.SpanContext upstream = io.opentelemetry.api.trace.SpanContext.createFromRemoteParent(
+                "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331",
+                sampled ? io.opentelemetry.api.trace.TraceFlags.getSampled()
+                        : io.opentelemetry.api.trace.TraceFlags.getDefault(),
+                io.opentelemetry.api.trace.TraceState.getDefault());
+        return io.opentelemetry.context.Context.root().with(Span.wrap(upstream));
+    }
+
+    @Test
+    @DisplayName("sampler mode: a request arriving with a sampled traceparent is not DROPped")
+    void sampledRemoteParentIsLeftToTheProcessor() throws IOException {
+        start(Enforcement.SAMPLER, flags(GLOBAL_ON, API_WEATHER));
+
+        Span server = tracer("tomcat").spanBuilder("GET /api/weather").setSpanKind(SpanKind.SERVER)
+                .setParent(incoming(true)).setAttribute("url.path", "/api/weather").startSpan();
+        Span call;
+        try (var s = server.makeCurrent()) {
+            call = tracer("http").spanBuilder("GET geocode").setSpanKind(SpanKind.CLIENT).startSpan();
+            call.end();
+        }
+        server.end();
+
+        assertTrue(server.getSpanContext().isSampled(), "the trace is upstream's: it must stay sampled");
+        assertTrue(call.getSpanContext().isSampled(), "so downstream still records it");
+        assertEquals(List.of("GET geocode"), exported(), "the matching span itself is suppressed");
+        assertEquals("b7ad6b7169203331", byName().get("GET geocode").getParentSpanId(),
+                "and its child re-parented to the upstream caller");
+    }
+
+    @Test
+    @DisplayName("sampler mode: a request whose upstream did not sample it is a root, and is DROPped")
+    void unsampledRemoteParentIsARoot() throws IOException {
+        start(Enforcement.SAMPLER, flags(GLOBAL_ON, API_WEATHER));
+        // An always-on delegate, so a delegate decision could not explain the drop.
+        tracerProvider.shutdown();
+        tracerProvider = SdkTracerProvider.builder()
+                .setSampler(new FlagAwareSampler(Sampler.alwaysOn(), policy))
+                .addSpanProcessor(counting)
+                .build();
+
+        tracer("tomcat").spanBuilder("GET /api/weather").setSpanKind(SpanKind.SERVER)
+                .setParent(incoming(false)).setAttribute("url.path", "/api/weather").startSpan().end();
+
+        assertEquals(0, counting.onStartCount.get());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Enforcement.class)
+    @DisplayName("a recordSpan of the wrong type records everything (fail open)")
+    void wrongTypeRecordSpanFailsOpen(Enforcement mode) throws IOException {
+        start(mode, """
+                {
+                  "$schema": "https://flagd.dev/schema/v0/flags.json",
+                  "flags": {
+                    %s,
+                    "recordSpan": {
+                      "state": "ENABLED", "defaultVariant": "on",
+                      "variants": { "on": "yes", "off": "no" }
+                    }
+                  }
+                }
+                """.formatted(GLOBAL_ON));
+
+        healthCheck();
+        weatherRequest();
+
+        assertEquals(4, exported().size());
+        assertEquals(null, policy.cachedRecord(), "a type mismatch is not a cacheable answer");
+    }
+
+    @ParameterizedTest
+    @EnumSource(Enforcement.class)
+    @DisplayName("adding a recordSpan rule to a ruleset that had none takes effect")
+    void addingRecordSpanLaterTakesEffect(Enforcement mode) throws IOException {
+        start(mode, """
+                {
+                  "$schema": "https://flagd.dev/schema/v0/flags.json",
+                  "flags": {
+                    %s
+                  }
+                }
+                """.formatted(GLOBAL_ON));
+        assertTrue(waitFor(() -> Boolean.TRUE.equals(policy.cachedRecord())), "missing recordSpan not cached");
+
+        write(flags(GLOBAL_ON, HEALTH));
+        assertTrue(waitFor(() -> policy.cachedRecord() == null), "the added rule never reached the extension");
+
+        healthCheck();
+        weatherRequest();
+
+        assertEquals(List.of("GET geocode", "SELECT forecast", "GET /weather"), exported());
     }
 }

@@ -180,7 +180,8 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         String host = env("FLAGD_HOST", DEFAULT_HOST);
         int port = envPort(DEFAULT_SYNC_PORT);
         log.info("otelfeature-java-extension: resolving '" + env("OTELFEATURE_FLAG_NAME", "telemetryLevel")
-                + "' and '" + env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled")
+                + "', '" + env("OTELFEATURE_ENABLED_FLAG_NAME", "otelEnabled")
+                + "' and '" + env("OTELFEATURE_RECORD_SPAN_FLAG_NAME", "recordSpan")
                 + "' from flagd's in-process sync stream at " + host + ":" + port);
         return FlagdOptions.builder()
                 .resolverType(Config.Resolver.IN_PROCESS)
@@ -239,7 +240,7 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
             return cached;
         }
         // At least one flag must be evaluated: build the span's context once,
-        // on first use, and share it between the two.
+        // on first use, and share it between the flags.
         LazyContext context = new LazyContext(contexts, span);
         // Precedence: the kill switch, then telemetryLevel, then recordSpan.
         // Whatever is decided by a higher one, the lower ones are not asked:
@@ -252,6 +253,37 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
             return TelemetryPolicy.DISABLED;
         }
         return of(level, recordFlag.value(context));
+    }
+
+    @Override
+    public TelemetryPolicy cachedGlobalPolicy() {
+        if (!floorEnabled) {
+            return TelemetryPolicy.DISABLED;
+        }
+        Boolean enabled = enabledFlag.cachedDecision();
+        if (enabled != null) {
+            if (!enabled) {
+                return TelemetryPolicy.DISABLED;
+            }
+            TelemetryLevel level = levelFlag.cachedDecision();
+            if (level != null) {
+                return of(level, true);
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public TelemetryPolicy globalPolicy(SpanStart span) {
+        TelemetryPolicy cached = cachedGlobalPolicy();
+        if (cached != null) {
+            return cached;
+        }
+        LazyContext context = new LazyContext(contexts, span);
+        if (!enabledFlag.value(context)) {
+            return TelemetryPolicy.DISABLED;
+        }
+        return of(levelFlag.value(context), true);
     }
 
     private static TelemetryPolicy of(TelemetryLevel level, boolean record) {

@@ -472,7 +472,7 @@ class FlagAwareSamplerTest {
     }
 
     @Test
-    @DisplayName("only a CLIENT span with a DB system counts as a non-propagating leaf")
+    @DisplayName("only a CLIENT span to a wire-protocol database counts as a non-propagating leaf")
     void databaseLeaf() {
         Attributes db = Attributes.of(AttributeKey.stringKey("db.system.name"), "postgresql");
         Attributes oldDb = Attributes.of(AttributeKey.stringKey("db.system"), "postgresql");
@@ -481,5 +481,10 @@ class FlagAwareSamplerTest {
         assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.INTERNAL, db));
         assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT, Attributes.empty()));
         assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT, null));
+        // Over HTTP, the transport propagates traceparent: not a leaf to DROP.
+        assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT,
+                Attributes.of(AttributeKey.stringKey("db.system.name"), "elasticsearch")));
+        assertFalse(FlagAwareSampler.isDatabaseLeaf(SpanKind.CLIENT,
+                Attributes.of(AttributeKey.stringKey("db.system.name"), "aws.dynamodb")));
     }
 }

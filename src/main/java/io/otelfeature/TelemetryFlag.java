@@ -48,8 +48,9 @@ import java.util.logging.Logger;
  * </table>
  *
  * <p>So {@link #classify(List)} evaluates the flag <em>once, without an
- * evaluation context</em>, purely to read the reason back. {@code STATIC} - and
- * only {@code STATIC} - is kept, and every subsequent span is then answered
+ * evaluation context</em>, purely to read the reason back. {@code STATIC} is
+ * kept - and so is {@code FLAG_NOT_FOUND}, as the fallback, because adding the
+ * flag later fires a configuration change naming it - and every subsequent span is then answered
  * from an {@link AtomicReference} with no evaluation and no hook chain at all.
  * Any other reason means the value can depend on who is asking, so
  * {@link #value()} evaluates for every span.
@@ -195,7 +196,10 @@ final class TelemetryFlag<T, R> {
         ErrorCode error = details.getErrorCode();
         if (error != null || Reason.ERROR.name().equals(details.getReason())) {
             String code = (error == null ? ErrorCode.GENERAL : error).name();
-            report(code, details.getErrorMessage(), error == ErrorCode.PROVIDER_NOT_READY);
+            // Not ready is every startup; not found is an optional flag the
+            // ruleset leaves out. Neither is worth a WARNING.
+            report(code, details.getErrorMessage(),
+                    error == ErrorCode.PROVIDER_NOT_READY || error == ErrorCode.FLAG_NOT_FOUND);
             return fallback;
         }
         if (Reason.DISABLED.name().equals(details.getReason())) {

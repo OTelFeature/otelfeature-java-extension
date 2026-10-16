@@ -55,7 +55,11 @@ public record TelemetryPolicy(boolean enabled, boolean suppressInternal, boolean
     /** Drop every span. */
     public static final TelemetryPolicy DISABLED = new TelemetryPolicy(false, false, true);
 
-    /** Drop this span ({@code recordSpan=false}); tracing as such stays on. */
+    /**
+     * Drop this span ({@code recordSpan=false}); tracing as such stays on.
+     * {@code suppressInternal} is not carried: the span is dropped whatever its
+     * kind, and the policy is per span.
+     */
     public static final TelemetryPolicy NOT_RECORDED = new TelemetryPolicy(true, false, false);
 
     /**

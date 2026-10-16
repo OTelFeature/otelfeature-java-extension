@@ -435,7 +435,7 @@ class TelemetryFlagTest {
     @Test
     @DisplayName("a failing flag is logged once, not once per span")
     void errorLoggedOnce() {
-        RecordingEvaluator<String> evaluator = new RecordingEvaluator<>(error(ErrorCode.FLAG_NOT_FOUND));
+        RecordingEvaluator<String> evaluator = new RecordingEvaluator<>(error(ErrorCode.PARSE_ERROR));
         TelemetryFlag<String, TelemetryLevel> resolver = levelResolver(evaluator);
 
         try (Warnings warnings = new Warnings()) {
@@ -444,7 +444,7 @@ class TelemetryFlagTest {
                 resolver.value();
             }
             assertEquals(1, warnings.records.size(), "one warning for 101 failing evaluations");
-            assertTrue(warnings.records.get(0).getMessage().contains("FLAG_NOT_FOUND"));
+            assertTrue(warnings.records.get(0).getMessage().contains("PARSE_ERROR"));
         }
     }
 
@@ -452,7 +452,7 @@ class TelemetryFlagTest {
     @DisplayName("a different error, or the same error after a recovery, is logged again")
     void newErrorLoggedAgain() {
         RecordingEvaluator<String> evaluator = new RecordingEvaluator<>(
-                error(ErrorCode.FLAG_NOT_FOUND),
+                error(ErrorCode.PARSE_ERROR),
                 error(ErrorCode.TYPE_MISMATCH),
                 details("IO", Reason.STATIC),
                 error(ErrorCode.TYPE_MISMATCH));
@@ -512,13 +512,27 @@ class TelemetryFlagTest {
     @DisplayName("a real error after provider-not-ready is still a warning")
     void realErrorAfterNotReadyWarns() {
         TelemetryFlag<String, TelemetryLevel> resolver = levelResolver(new RecordingEvaluator<>(
-                error(ErrorCode.PROVIDER_NOT_READY), error(ErrorCode.FLAG_NOT_FOUND)));
+                error(ErrorCode.PROVIDER_NOT_READY), error(ErrorCode.PARSE_ERROR)));
 
         try (Warnings warnings = new Warnings()) {
             resolver.value();
             resolver.value();
             assertEquals(1, warnings.records.size());
-            assertTrue(warnings.records.get(0).getMessage().contains("FLAG_NOT_FOUND"));
+            assertTrue(warnings.records.get(0).getMessage().contains("PARSE_ERROR"));
         }
+    }
+
+    @Test
+    @DisplayName("a flag the ruleset leaves out is not a warning")
+    void flagNotFoundIsQuiet() {
+        TelemetryFlag<String, TelemetryLevel> resolver =
+                levelResolver(new RecordingEvaluator<>(error(ErrorCode.FLAG_NOT_FOUND)));
+
+        try (Warnings warnings = new Warnings()) {
+            resolver.classify(null);
+            assertEquals(TelemetryLevel.FULL, resolver.value());
+            assertEquals(0, warnings.records.size(), "an optional flag may simply be absent");
+        }
+        assertEquals(TelemetryLevel.FULL, resolver.cachedDecision(), "and its fallback is kept");
     }
 }

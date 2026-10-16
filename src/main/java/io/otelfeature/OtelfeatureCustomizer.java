@@ -182,6 +182,24 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
                     return TelemetryPolicy.FULL;
                 }
             }
+
+            @Override
+            public TelemetryPolicy globalPolicy(SpanStart span) {
+                try {
+                    return view.apply(policy.globalPolicy(span));
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
+
+            @Override
+            public TelemetryPolicy cachedGlobalPolicy() {
+                try {
+                    return view.apply(policy.cachedGlobalPolicy());
+                } catch (Throwable t) {
+                    return TelemetryPolicy.FULL;
+                }
+            }
         };
     }
 }

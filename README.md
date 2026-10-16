@@ -70,12 +70,28 @@ A span it answers `false` for is not exported.
 `telemetryLevel=OFF` > `recordSpan`. `recordSpan=true` never re-enables what a
 global switch turned off, and while one has, `recordSpan` isn't even evaluated.
 
+Either way, the decision is made once, when the span starts.
+
 | | `processor` mode | `sampler` mode |
 |---|---|---|
-| a root span (health check, incoming request) | suppressed at `onEnd`; children re-parented | `DROP`: never created, the whole trace goes |
-| a database client leaf (`CLIENT` with `db.system.name`) | suppressed at `onEnd` | `DROP`: never created |
-| any other span that propagates (an HTTP client call mid-trace) | suppressed at `onEnd`; children re-parented | suppressed by the processor, **not** dropped, so downstream services don't inherit `sampled=0` |
+| a trace root (no parent, e.g. a health-check probe; or an upstream that did not sample it) | suppressed (dropped at `onEnd`); children re-parented | `DROP`: never recorded, the whole trace goes |
+| a request arriving with a **sampled** `traceparent` | suppressed; children re-parented | suppressed by the processor, **not** dropped: it is the upstream's trace, and dropping it would send `sampled=0` on to every service below |
+| a database call over its own wire protocol (`CLIENT` with `db.system.name` `postgresql`, `mysql`, `redis`, `mongodb`, …; or the deprecated `db.system`) | suppressed | `DROP`: never recorded |
+| a database reached over HTTP (`elasticsearch`, `aws.dynamodb`, …), or any other span that propagates mid-trace | suppressed; children re-parented | suppressed by the processor, not dropped, so downstream services don't inherit `sampled=0` |
 | a rule on `otel.scope.*` (e.g. the JDBC instrumentation) | applies | applies, but at the processor: a sampler is not told the scope |
+
+Caveats for `sampler` mode:
+
+- **Negative scope rules.** A rule like "off unless `otel.scope.name` is X"
+  sees no scope at the sampler, so it would `DROP` every root. Write scope
+  rules positively ("off if `otel.scope.name` is X").
+- **sqlcommenter.** With the agent's experimental JDBC sqlcommenter enabled,
+  the DB span's `traceparent` is written into the SQL. A dropped DB span then
+  sends `sampled=0` to a database that traces. It is off by default.
+- **Non-parent-based samplers.** With `OTEL_TRACES_SAMPLER=always_on` (not the
+  agent's default `parentbased_always_on`), the children of a dropped root are
+  sampled afresh and exported as orphans, and their outgoing calls carry
+  `sampled=1`. "The whole trace goes" holds only for a parent-based sampler.
 
 A static `recordSpan`, or none at all, costs nothing per span: the answer is
 cached until the ruleset changes. A missing flag or a provider error records

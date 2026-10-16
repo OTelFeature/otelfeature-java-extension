@@ -57,6 +57,31 @@ public interface TelemetryPolicySource {
         return null;
     }
 
+    /**
+     * The policy from the global switches alone ({@code OTEL_SDK_DISABLED},
+     * {@code otelEnabled}, {@code telemetryLevel}), with {@code record} taken
+     * as {@code true}: for decisions a per-span flag cannot change, so it need
+     * not be evaluated.
+     *
+     * @param span the span the decision is for
+     * @return the policy without {@code recordSpan}
+     */
+    default TelemetryPolicy globalPolicy(SpanStart span) {
+        TelemetryPolicy p = policy(span);
+        return TelemetryPolicy.of(p.enabled(), p.suppressInternal(), true);
+    }
+
+    /**
+     * {@link #globalPolicy(SpanStart)} without the span, if the global switches
+     * don't depend on it.
+     *
+     * @return the span-independent global policy, or {@code null}
+     */
+    default TelemetryPolicy cachedGlobalPolicy() {
+        TelemetryPolicy p = cachedPolicy();
+        return p == null ? null : TelemetryPolicy.of(p.enabled(), p.suppressInternal(), true);
+    }
+
     /** Releases whatever backs this source. The default does nothing. */
     default void shutdown() {}
 }

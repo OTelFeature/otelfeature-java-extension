@@ -49,9 +49,11 @@ import java.util.logging.Logger;
  *       sampled local parent is left to the delegate, so a trace that
  *       was already sampled when the flag flipped finishes coherently instead
  *       of losing its tail.</li>
- *   <li>{@code recordSpan=false} for this span: {@code DROP} it if it is a local
- *       root or a database client leaf ({@code CLIENT} with
- *       {@code db.system.name}); any other span is left to
+ *   <li>{@code recordSpan=false} for this span: {@code DROP} it if it is a
+ *       trace root (no parent, or a remote parent that was not sampled) or a
+ *       database client leaf ({@code CLIENT} with a wire-protocol
+ *       {@code db.system.name}); any other span - including a request that
+ *       arrives with a sampled {@code traceparent} - is left to
  *       {@link FilteringSpanProcessor}, so a mid-trace span that propagates
  *       never sends {@code sampled=0} downstream. Rules on
  *       {@code otel.scope.*} never match here (a sampler is not told the
@@ -96,14 +98,17 @@ final class FlagAwareSampler implements Sampler {
         // root was dropped.
         boolean askEnabled = localRoot || !parent.isSampled();
         // recordSpan=false may only DROP where losing the subtree is the
-        // intended outcome: a local root (the whole trace goes) or a leaf that
-        // propagates nothing (a DB client call). Anything else that propagates
-        // mid-trace is left to the processor, which suppresses it and
-        // re-parents its children, so downstream services don't inherit
+        // intended outcome: a trace root (no parent, or an upstream that did
+        // not sample it - the whole trace goes) or a leaf that propagates
+        // nothing (a DB call over its own wire protocol). Anything else that
+        // propagates mid-trace - including a request arriving with a sampled
+        // traceparent - is left to the processor, which suppresses it and
+        // re-parents its children, so downstream services never inherit
         // sampled=0.
-        boolean askRecord = localRoot || isDatabaseLeaf(spanKind, attributes);
+        boolean traceRoot = !parent.isValid() || (parent.isRemote() && !parent.isSampled());
+        boolean askRecord = traceRoot || isDatabaseLeaf(spanKind, attributes);
         if (askEnabled || askRecord) {
-            TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes);
+            TelemetryPolicy decision = policyFor(traceId, name, spanKind, attributes, askRecord);
             if (decision != null) {
                 if (askEnabled && !decision.enabled()) {
                     return SamplingResult.drop();
@@ -117,25 +122,53 @@ final class FlagAwareSampler implements Sampler {
     }
 
     /**
-     * A database client call: a leaf that propagates no context, so dropping
-     * it drops nothing else.
+     * A database client call over the database's own wire protocol: a leaf
+     * that propagates no context, so dropping it drops nothing else.
+     *
+     * <p>Deliberately an allowlist. Databases reached over HTTP
+     * (Elasticsearch, OpenSearch, DynamoDB, CouchDB, ClickHouse's HTTP
+     * interface, ...) carry {@code db.system.name} too, but their transport
+     * propagates {@code traceparent}; they are left to the processor. The
+     * same goes for JDBC with the agent's experimental sqlcommenter enabled,
+     * which writes the traceparent into the SQL - see the README.
      */
     static boolean isDatabaseLeaf(SpanKind kind, Attributes attributes) {
-        return kind == SpanKind.CLIENT && attributes != null
-                && (attributes.get(DB_SYSTEM_NAME) != null || attributes.get(DB_SYSTEM) != null);
+        if (kind != SpanKind.CLIENT || attributes == null) {
+            return false;
+        }
+        String system = attributes.get(DB_SYSTEM_NAME);
+        if (system == null) {
+            system = attributes.get(DB_SYSTEM);
+        }
+        return system != null && WIRE_PROTOCOL_DATABASES.contains(system);
     }
+
+    /** Semconv {@code db.system.name} values whose client speaks a non-HTTP wire protocol. */
+    private static final java.util.Set<String> WIRE_PROTOCOL_DATABASES = java.util.Set.of(
+            "postgresql", "mysql", "mariadb", "oracle.db", "oracle", "microsoft.sql_server", "mssql",
+            "ibm.db2", "db2", "h2", "hsqldb", "derby", "sqlite", "other_sql",
+            "redis", "valkey", "memcached", "mongodb", "cassandra", "couchbase", "neo4j");
 
     private static final AttributeKey<String> DB_SYSTEM_NAME = AttributeKey.stringKey("db.system.name");
     private static final AttributeKey<String> DB_SYSTEM = AttributeKey.stringKey("db.system");
 
-    /** The policy for this span, or {@code null} to delegate (fail open). */
-    private TelemetryPolicy policyFor(String traceId, String name, SpanKind kind, Attributes attributes) {
+    /**
+     * The policy for this span, or {@code null} to delegate (fail open).
+     *
+     * @param needRecord whether {@code recordSpan} matters for this decision;
+     *     when it doesn't (a child of an unsampled parent, say), only the global
+     *     switches are asked, so a targeted recordSpan is not evaluated for
+     *     spans it could not drop anyway
+     */
+    private TelemetryPolicy policyFor(
+            String traceId, String name, SpanKind kind, Attributes attributes, boolean needRecord) {
         try {
-            TelemetryPolicy cached = policy.cachedPolicy();
+            TelemetryPolicy cached = needRecord ? policy.cachedPolicy() : policy.cachedGlobalPolicy();
             if (cached != null) {
                 return cached;
             }
-            return policy.policy(new SpanStart(traceId, name, kind, attributes, null));
+            SpanStart span = new SpanStart(traceId, name, kind, attributes, null);
+            return needRecord ? policy.policy(span) : policy.globalPolicy(span);
         } catch (Throwable t) {
             // The source is not supposed to throw; if it does anyway, tracing
             // stays as the delegate would have it. Warn once, not per span.
