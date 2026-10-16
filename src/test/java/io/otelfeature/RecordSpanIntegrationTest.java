@@ -127,7 +127,8 @@ class RecordSpanIntegrationTest {
                         .offlinePollIntervalMs(50)
                         .build());
         policy.setResource(Resource.create(Attributes.builder().put("service.name", "weather").build()));
-        assertTrue(waitFor(() -> policy.cachedEnabled() != null), "provider never became ready");
+        // Not a cached value: a fallback cached before READY satisfies that too.
+        assertTrue(waitFor(() -> policy.providerReady()), "provider never became ready");
 
         exporter = new FilteringSpanProcessorTest.InMemoryExporter();
         counting = new FilteringSpanProcessorTest.CountingProcessor();

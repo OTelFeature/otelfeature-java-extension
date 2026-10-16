@@ -1,0 +1,18 @@
+// Init script for ci/Dockerfile: download every dependency the build can need,
+// artifacts included, into the Gradle user home.
+//
+// `gradle dependencies` alone is not enough: it resolves the dependency
+// *graph* (POMs/modules) but not the JARs, so an --offline build in the image
+// would still miss them. Resolving each resolvable configuration fetches the
+// files too. Plugins (shadow) are already on the build script classpath by
+// the time this runs.
+//
+// A failed resolution fails the image build, on purpose: a cached image with a
+// gap would only fail later, offline, with a far less helpful message.
+allprojects {
+    afterEvaluate { project ->
+        project.configurations
+                .findAll { it.canBeResolved }
+                .each { it.resolve() }
+    }
+}

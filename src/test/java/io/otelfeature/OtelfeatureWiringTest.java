@@ -113,7 +113,8 @@ class OtelfeatureWiringTest {
                 TelemetryPolicy.FULL,
                 FlagdOptions.builder().resolverType(Config.Resolver.FILE)
                         .offlineFlagSourcePath(file.toString()).offlinePollIntervalMs(50).build());
-        assertTrue(waitFor(() -> policy.sampleRatioInPlay()), "provider never became ready");
+        // Not a cached value: a fallback cached before READY satisfies that too.
+        assertTrue(waitFor(() -> policy.providerReady()), "provider never became ready");
     }
 
     private static SpanStart root() {

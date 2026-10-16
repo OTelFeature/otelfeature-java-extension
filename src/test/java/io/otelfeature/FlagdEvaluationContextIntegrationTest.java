@@ -136,7 +136,8 @@ class FlagdEvaluationContextIntegrationTest {
                 .put("deployment.environment.name", "prod")
                 .put("telemetry.sdk.language", "java")
                 .build()));
-        assertTrue(waitFor(() -> Boolean.TRUE.equals(policy.cachedEnabled())), "provider never became ready");
+        // Not a cached value: a fallback cached before READY satisfies that too.
+        assertTrue(waitFor(() -> policy.providerReady()), "provider never became ready");
     }
 
     @AfterEach

@@ -109,6 +109,9 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
      */
     private volatile Composed composed = Composed.NONE;
 
+    /** Set once the READY event has re-classified every flag. */
+    private volatile boolean providerReady;
+
     private record Composed(TelemetryPolicy global, TelemetryPolicy span, TelemetryPolicy root) {
         static final Composed NONE = new Composed(null, null, null);
 
@@ -211,7 +214,10 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
         // Subscribe before registering the provider, so no event can land in
         // the gap. The SDK also replays the current state to a handler as it is
         // added, so subscribing early costs nothing.
-        client.onProviderReady(this::reclassify);
+        client.onProviderReady(details -> {
+            reclassify(details);
+            providerReady = true;
+        });
         client.onProviderConfigurationChanged(this::reclassify);
         client.onProviderError(this::reclassify);
         client.onProviderStale(this::reclassify);
@@ -372,6 +378,19 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
      */
     Double cachedRatio() {
         return ratioFlag.cachedDecision();
+    }
+
+    /**
+     * Whether the provider has been ready and every flag was classified
+     * against its ruleset. Before that, a flag can be cached as its fallback
+     * (an early event classifies it as missing); the READY event re-classifies
+     * all of them. Visible for testing: wait for this, not for a cached value,
+     * which a fallback satisfies too.
+     *
+     * @return {@code true} once READY has been handled
+     */
+    boolean providerReady() {
+        return providerReady;
     }
 
     /**
