@@ -91,19 +91,44 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
             return;
         }
         FlagdTelemetryPolicy policy = new FlagdTelemetryPolicy();
+        ErrorRateReader errorRate = new ErrorRateReader(policy::setErrorRate,
+                envDuration("OTELFEATURE_ERROR_RATE_INTERVAL", Duration.ofSeconds(10)),
+                envLong("OTELFEATURE_ERROR_RATE_MIN_REQUESTS", 10));
+        install(autoConfiguration, policy, errorRate, Enforcement.fromEnvironment());
+
+        // The provider holds a gRPC channel to flagd; close it on the way out
+        // rather than leaving the sync stream to be torn down by the JVM.
+        Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
+                "otelfeature-shutdown"));
+    }
+
+    /**
+     * The wiring itself, with its parts passed in. Visible for testing.
+     *
+     * @param autoConfiguration the agent's autoconfigure hooks
+     * @param policy where the flags come from
+     * @param errorRate the reader that feeds {@code otelfeature.http.server.error_rate}
+     * @param mode where {@code enabled=false} is enforced
+     */
+    static void install(AutoConfigurationCustomizer autoConfiguration, FlagdTelemetryPolicy policy,
+            ErrorRateReader errorRate, Enforcement mode) {
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
-        Enforcement mode = Enforcement.fromEnvironment();
         Logger.getLogger(OtelfeatureCustomizer.class.getName()).info(
                 "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
                         + " (" + Enforcement.ENV + ")");
 
         // The service's HTTP error rate, from its own request-duration metric,
-        // for rules like "error_rate > 0.05 -> traceSampleRatio 1.0".
-        ErrorRateReader errorRate = new ErrorRateReader(policy::setErrorRate,
-                envDuration("OTELFEATURE_ERROR_RATE_INTERVAL", Duration.ofSeconds(10)),
-                envLong("OTELFEATURE_ERROR_RATE_MIN_REQUESTS", 10));
-        autoConfiguration.addMeterProviderCustomizer(
-                (meterProvider, config) -> meterProvider.registerMetricReader(errorRate));
+        // for rules like "error_rate > 0.05 -> traceSampleRatio 1.0". Not with
+        // OTEL_METRICS_EXPORTER=none: without a reader the agent's meters are
+        // no-ops, and ours would switch the whole metrics SDK on for nobody.
+        autoConfiguration.addMeterProviderCustomizer((meterProvider, config) -> {
+            if (metricsExportDisabled(config.getString("otel.metrics.exporter", "otlp"))) {
+                log.info("otelfeature-java-extension: OTEL_METRICS_EXPORTER=none - "
+                        + ErrorRateReader.ERROR_RATE_KEY_DOC + " is not computed");
+                return meterProvider;
+            }
+            return meterProvider.registerMetricReader(errorRate);
+        });
 
         // The resource is the process-wide part of every evaluation context.
         autoConfiguration.addResourceCustomizer((resource, config) -> {
@@ -128,11 +153,19 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
 
         autoConfiguration.addSpanExporterCustomizer(
                 (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
+    }
 
-        // The provider holds a gRPC channel to flagd; close it on the way out
-        // rather than leaving the sync stream to be torn down by the JVM.
-        Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
-                "otelfeature-shutdown"));
+    /** Whether {@code otel.metrics.exporter} lists only {@code none}. */
+    static boolean metricsExportDisabled(String exporters) {
+        if (exporters == null || exporters.isBlank()) {
+            return false;
+        }
+        for (String exporter : exporters.split(",")) {
+            if (!"none".equalsIgnoreCase(exporter.trim())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -165,7 +198,7 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
             return parsed;
         } catch (NumberFormatException e) {
             log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a duration, using "
-                    + fallback.toSeconds() + "s");
+                    + fallback.toMillis() + "ms");
             return fallback;
         }
     }
@@ -177,7 +210,12 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
         }
         try {
             long parsed = Long.parseLong(value.trim());
-            return parsed < 0 ? fallback : parsed;
+            if (parsed < 0) {
+                log.warning("otelfeature-java-extension: " + name + "='" + value + "' is negative, using "
+                        + fallback);
+                return fallback;
+            }
+            return parsed;
         } catch (NumberFormatException e) {
             log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a number, using "
                     + fallback);

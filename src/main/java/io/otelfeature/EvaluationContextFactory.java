@@ -201,7 +201,7 @@ final class EvaluationContextFactory {
     }
 
     /** Top-level namespaces of the keys this extension adds itself. */
-    private static final List<String> OWN_TOPS = List.of("otel", "span");
+    private static final List<String> OWN_TOPS = List.of("otel", "span", "otelfeature");
 
     /** The first non-empty dot segment of a key, or {@code null} if there is none. */
     private static String topSegment(String key) {

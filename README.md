@@ -407,15 +407,34 @@ outside script and no new metric:
 - **Metrics, not spans.** A sampled-out span never records a status, but the
   histogram is recorded whatever the sampling does, so turning sampling *down*
   doesn't blind the loop.
-- **Unchanged export.** The extra reader has its own delta storage. What the
-  OTLP reader exports, cumulative or not, is unaffected (tested).
+- **Unchanged export.** The extra reader has its own delta storage, and keeps
+  storage only for histograms (everything else is dropped for it). What the
+  OTLP reader exports, cumulative or not, is unaffected (tested), with one
+  caveat: **asynchronous instruments' callbacks also run on this reader's
+  interval**, since a meter provider invokes them for every reader. A callback
+  with side effects (say, `observe(counter.getAndSet(0))`) would hand part of
+  its data to this reader instead of the exporter. Idempotent callbacks, which
+  the agent's are, are unaffected.
+- **Exponential histograms**, if a view switches `http.server.request.duration`
+  to them, are read too; only counts are used.
+- **Not with `OTEL_METRICS_EXPORTER=none`.** With no reader the agent's meters
+  are no-ops. Registering this one would switch the whole metrics SDK on, and
+  every instrument would aggregate for nobody. So in that case the reader isn't
+  registered, the key never appears, and a rule on it falls back to its
+  default. The same goes when HTTP server instrumentation is off
+  (`otel.instrumentation.common.default-enabled=false`, or the server module
+  disabled): there is no histogram to read.
+- **On failure** (a collection that throws), the last rate is withdrawn rather
+  than kept, so a rule doesn't stay stuck on a stale number.
 - **`OTELFEATURE_ERROR_RATE_INTERVAL`** (default `10s`; accepts `500ms`, `10s`,
   `1m`, or plain seconds) sets how often it is collected.
 - **`OTELFEATURE_ERROR_RATE_MIN_REQUESTS`** (default `10`). An interval with
   fewer requests publishes **no** rate, and the key is left out of the
   context: 1 failure in 2 requests is not a 50% error rate worth acting on.
   A rule then sees the key as missing, and `>` against a missing `var` is
-  false.
+  false. Prefer `>`-style rules: with `<` or `<=`, some JsonLogic evaluators
+  coerce a missing value to `0`, so "error rate below 1%" would match while
+  there is *no* rate.
 - The rate is per service (per process, in fact), which matches "turns
   sampling up *for that service*".
 

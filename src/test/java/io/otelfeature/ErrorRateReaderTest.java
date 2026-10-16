@@ -240,4 +240,91 @@ class ErrorRateReaderTest {
         assertEquals(expectedMillis,
                 OtelfeatureCustomizer.parseDuration(value, Duration.ofSeconds(10), "TEST").toMillis());
     }
+
+    @Test
+    @DisplayName("a failing collection withdraws the last rate instead of keeping it forever")
+    void failedCollectionWithdrawsTheRate() {
+        int[] calls = {0};
+        ErrorRateReader reader = reader(1);
+        meterProvider = SdkMeterProvider.builder().registerMetricReader(reader).build();
+        requests(histogram(meterProvider), 6, 4);
+        reader.collectSafely();
+        // From now on, collecting fails.
+        reader.register(new io.opentelemetry.sdk.metrics.export.CollectionRegistration() {
+            @Override
+            public Collection<MetricData> collectAllMetrics() {
+                calls[0]++;
+                throw new IllegalStateException("meter provider is gone");
+            }
+        });
+        reader.collectSafely();
+
+        assertEquals(1, calls[0]);
+        assertEquals(java.util.Arrays.asList(0.4, null), published);
+    }
+
+    @Test
+    @DisplayName("an exponential histogram (set by a view) is read too")
+    void exponentialHistogram() {
+        ErrorRateReader reader = reader(1);
+        meterProvider = SdkMeterProvider.builder()
+                .registerView(io.opentelemetry.sdk.metrics.InstrumentSelector.builder().setName(ErrorRateReader.METRIC).build(),
+                        io.opentelemetry.sdk.metrics.View.builder()
+                                .setAggregation(io.opentelemetry.sdk.metrics.Aggregation.base2ExponentialBucketHistogram())
+                                .build())
+                .registerMetricReader(reader)
+                .build();
+        requests(histogram(meterProvider), 15, 5);
+
+        reader.collect();
+
+        assertEquals(List.of(0.25), published);
+    }
+
+    @Test
+    @DisplayName("forceFlush does not cut an interval short")
+    void forceFlushIsANoOp() {
+        ErrorRateReader reader = reader(1);
+        requests(histogram(reader), 1, 1);
+
+        meterProvider.forceFlush().join(5, java.util.concurrent.TimeUnit.SECONDS);
+        assertEquals(List.of(), published, "a flush publishes nothing");
+        reader.collect();
+        assertEquals(List.of(0.5), published, "the interval is intact");
+    }
+
+    @Test
+    @DisplayName("other readers' asynchronous instruments still report what they observe")
+    void asyncInstrumentsUnchanged() {
+        InMemoryMetricReader otlp = InMemoryMetricReader.create();
+        ErrorRateReader ours = reader(1);
+        meterProvider = SdkMeterProvider.builder().registerMetricReader(otlp).registerMetricReader(ours).build();
+        long[] heap = {512};
+        int[] callbacks = {0};
+        meterProvider.get("jvm").gaugeBuilder("jvm.memory.used").ofLongs().buildWithCallback(m -> {
+            callbacks[0]++;
+            m.record(heap[0]);
+        });
+
+        ours.collect();
+        ours.collect();
+        List<Long> seen = otlp.collectAllMetrics().stream()
+                .filter(m -> m.getName().equals("jvm.memory.used"))
+                .flatMap(m -> m.getLongGaugeData().getPoints().stream())
+                .map(p -> p.getValue())
+                .collect(Collectors.toList());
+
+        assertEquals(List.of(512L), seen, "an idempotent callback's value reaches the OTLP reader unchanged");
+        assertEquals(3, callbacks[0], "but callbacks run on our collections too (documented)");
+    }
+
+    @Test
+    @DisplayName("OTEL_METRICS_EXPORTER: only an exporter list of nothing but 'none' disables the reader")
+    void metricsExporterNone() {
+        assertEquals(true, OtelfeatureCustomizer.metricsExportDisabled("none"));
+        assertEquals(true, OtelfeatureCustomizer.metricsExportDisabled(" none , NONE "));
+        assertEquals(false, OtelfeatureCustomizer.metricsExportDisabled("otlp"));
+        assertEquals(false, OtelfeatureCustomizer.metricsExportDisabled("otlp,none"));
+        assertEquals(false, OtelfeatureCustomizer.metricsExportDisabled(""));
+    }
 }

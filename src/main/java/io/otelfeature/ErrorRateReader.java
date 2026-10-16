@@ -61,6 +61,9 @@ final class ErrorRateReader implements MetricReader {
     private static final Logger log = Logger.getLogger(ErrorRateReader.class.getName());
 
     static final String METRIC = "http.server.request.duration";
+
+    /** For log lines: the context key this reader feeds. */
+    static final String ERROR_RATE_KEY_DOC = EvaluationContextFactory.ERROR_RATE_KEY;
     private static final AttributeKey<String> ERROR_TYPE = AttributeKey.stringKey("error.type");
     private static final AttributeKey<Long> STATUS_CODE = AttributeKey.longKey("http.response.status_code");
 
@@ -85,6 +88,8 @@ final class ErrorRateReader implements MetricReader {
 
     @Override
     public void register(CollectionRegistration registration) {
+        // Registered twice (a second meter provider): one scheduler, not two.
+        shutdownScheduler();
         this.registration = registration;
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "otelfeature-error-rate");
@@ -106,13 +111,30 @@ final class ErrorRateReader implements MetricReader {
         publish.accept(errorRate(registration.collectAllMetrics(), minRequests));
     }
 
-    private void collectSafely() {
+    /** Collects one interval, never throwing. Visible for tests. */
+    void collectSafely() {
         try {
             collect();
         } catch (Throwable t) {
-            // A failure here must not kill the scheduler, nor reach the app.
+            // A failure here must not kill the scheduler, nor reach the app -
+            // and must not leave the last rate published forever: withdraw it,
+            // so a rule on it falls back to its default.
+            publish.accept(null);
             log.log(Level.FINE, "otelfeature-java-extension: error-rate collection failed", t);
         }
+    }
+
+    /**
+     * Only the request-duration histogram is read; everything else is
+     * dropped, so this reader keeps no storage for instruments it ignores.
+     * (Asynchronous instruments' callbacks still run on every collection: a
+     * meter provider invokes them for each reader.)
+     */
+    @Override
+    public io.opentelemetry.sdk.metrics.Aggregation getDefaultAggregation(InstrumentType instrumentType) {
+        return instrumentType == InstrumentType.HISTOGRAM
+                ? io.opentelemetry.sdk.metrics.Aggregation.defaultAggregation()
+                : io.opentelemetry.sdk.metrics.Aggregation.drop();
     }
 
     /**
@@ -126,17 +148,26 @@ final class ErrorRateReader implements MetricReader {
         long requests = 0;
         long errors = 0;
         for (MetricData metric : metrics) {
-            if (!METRIC.equals(metric.getName()) || metric.getType() != MetricDataType.HISTOGRAM) {
+            if (!METRIC.equals(metric.getName())) {
                 continue;
             }
-            for (HistogramPointData point : metric.getHistogramData().getPoints()) {
-                requests += point.getCount();
-                if (isError(point.getAttributes())) {
-                    errors += point.getCount();
+            // A view may turn the histogram exponential; it applies to every
+            // reader, ours included. Either way only counts are read.
+            if (metric.getType() == MetricDataType.HISTOGRAM) {
+                for (HistogramPointData point : metric.getHistogramData().getPoints()) {
+                    requests += point.getCount();
+                    errors += isError(point.getAttributes()) ? point.getCount() : 0;
+                }
+            } else if (metric.getType() == MetricDataType.EXPONENTIAL_HISTOGRAM) {
+                for (io.opentelemetry.sdk.metrics.data.ExponentialHistogramPointData point
+                        : metric.getExponentialHistogramData().getPoints()) {
+                    requests += point.getCount();
+                    errors += isError(point.getAttributes()) ? point.getCount() : 0;
                 }
             }
         }
         if (requests == 0 || requests < minRequests) {
+            // requests == 0 matters when minRequests is 0: no data is no rate.
             return null;
         }
         return (double) errors / requests;
@@ -150,19 +181,28 @@ final class ErrorRateReader implements MetricReader {
         return status != null && status >= 500;
     }
 
+    /**
+     * A no-op: a flush (a Lambda handler finishing, a shutdown hook) would
+     * otherwise cut the current interval short and publish a rate over a
+     * partial window - possibly racing the scheduler and landing last.
+     */
     @Override
     public CompletableResultCode forceFlush() {
-        collectSafely();
         return CompletableResultCode.ofSuccess();
     }
 
     @Override
     public CompletableResultCode shutdown() {
+        shutdownScheduler();
+        return CompletableResultCode.ofSuccess();
+    }
+
+    private void shutdownScheduler() {
         ScheduledExecutorService scheduler = executor;
         if (scheduler != null) {
             scheduler.shutdownNow();
+            executor = null;
         }
-        return CompletableResultCode.ofSuccess();
     }
 
     @Override
