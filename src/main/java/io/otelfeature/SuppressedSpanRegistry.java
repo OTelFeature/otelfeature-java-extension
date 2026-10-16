@@ -18,26 +18,65 @@ package io.otelfeature;
 
 import io.opentelemetry.api.trace.SpanContext;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Thread-safe registry that maps suppressed span IDs to their parent span
  * contexts, enabling re-parenting of surviving children.
  *
- * <p>Shared between {@link FilteringSpanProcessor} (which records dropped
- * INTERNAL spans) and {@link ReparentingSpanExporter} (which re-parents
- * surviving children whose parents were suppressed).
+ * <p>Shared between {@link FilteringSpanProcessor} (which records every span
+ * it drops - {@code INTERNAL} ones at {@code IO}, all of them at {@code OFF})
+ * and {@link ReparentingSpanExporter} (which re-parents surviving children
+ * whose parents were suppressed).
  *
- * <p>The registry is bounded to prevent unbounded memory growth. When the
- * maximum size is reached, the registry is cleared entirely — a safety valve
- * that should never trigger in normal operation. A span whose entry is dropped
- * by that clear between its start and its end is exported rather than
- * suppressed, which is the safe direction to fail in.
+ * <p>The registry is bounded, and under {@code OFF} - where every span is
+ * recorded - the bound is reached routinely. So it is enforced by sweeping out
+ * entries for spans that have <em>already ended</em>, never in-flight ones: an
+ * in-flight span whose entry vanished would be exported at {@code onEnd}, and
+ * show up as a stray span while tracing is supposedly off. In-flight entries
+ * are bounded by concurrency, not throughput. Sweeps run once per
+ * {@code sweepAt} new entries, so they cost O(1) amortised per span.
+ *
+ * <p>Only if in-flight entries alone reach {@code hardMax} - spans that are
+ * started and never ended, i.e. an instrumentation leak - is the registry
+ * cleared entirely. A span whose entry is dropped that way is exported rather
+ * than suppressed, which is the safe direction to fail in.
  */
 class SuppressedSpanRegistry {
 
-    private static final int MAX_SIZE = 10_000;
+    private static final int DEFAULT_SWEEP_AT = 10_000;
+    private static final int DEFAULT_HARD_MAX = 100_000;
 
-    private final ConcurrentHashMap<String, SpanContext> map = new ConcurrentHashMap<>();
+    /** A suppressed span's parent, and whether the span has ended yet. */
+    private static final class Entry {
+        final SpanContext parent;
+        volatile boolean ended;
+
+        Entry(SpanContext parent) {
+            this.parent = parent;
+        }
+    }
+
+    private final ConcurrentHashMap<String, Entry> map = new ConcurrentHashMap<>();
+    private final int sweepAt;
+    private final int hardMax;
+    private final AtomicInteger nextSweep;
+
+    SuppressedSpanRegistry() {
+        this(DEFAULT_SWEEP_AT, DEFAULT_HARD_MAX);
+    }
+
+    /**
+     * Visible for testing: small limits make sweeps observable.
+     *
+     * @param sweepAt how many new entries between sweeps
+     * @param hardMax in-flight entries beyond which the registry is cleared
+     */
+    SuppressedSpanRegistry(int sweepAt, int hardMax) {
+        this.sweepAt = sweepAt;
+        this.hardMax = hardMax;
+        this.nextSweep = new AtomicInteger(sweepAt);
+    }
 
     /**
      * Records that a span was suppressed, mapping its span ID to its parent
@@ -47,10 +86,35 @@ class SuppressedSpanRegistry {
      * @param parentContext the suppressed span's parent context
      */
     void record(String spanId, SpanContext parentContext) {
-        if (map.size() >= MAX_SIZE) {
+        if (map.size() >= nextSweep.get()) {
+            sweep();
+        }
+        map.put(spanId, new Entry(parentContext));
+    }
+
+    /**
+     * Marks a suppressed span as ended, so a later sweep may drop its entry.
+     *
+     * @param spanId the span ID that ended
+     */
+    void markEnded(String spanId) {
+        Entry entry = map.get(spanId);
+        if (entry != null) {
+            entry.ended = true;
+        }
+    }
+
+    private synchronized void sweep() {
+        if (map.size() < nextSweep.get()) {
+            return; // another thread swept while we waited
+        }
+        map.values().removeIf(entry -> entry.ended);
+        if (map.size() >= hardMax) {
+            // Only spans that were never ended are left: a leak upstream.
             map.clear();
         }
-        map.put(spanId, parentContext);
+        // Next sweep after another sweepAt entries, however many survived.
+        nextSweep.set(map.size() + sweepAt);
     }
 
     /**
@@ -75,20 +139,21 @@ class SuppressedSpanRegistry {
      *         ID is not in the registry (was not suppressed)
      */
     SpanContext resolve(String spanId) {
-        SpanContext resolved = map.get(spanId);
-        if (resolved == null) {
+        Entry entry = map.get(spanId);
+        if (entry == null) {
             return null;
         }
+        SpanContext resolved = entry.parent;
         // Follow the chain: if the resolved parent was also suppressed,
         // keep following until we find a non-suppressed ancestor.
         int depth = 0;
         while (depth < 100) {
             String resolvedId = resolved.getSpanId();
-            SpanContext next = map.get(resolvedId);
-            if (next == null || next.getSpanId().equals(resolvedId)) {
+            Entry next = map.get(resolvedId);
+            if (next == null || next.parent.getSpanId().equals(resolvedId)) {
                 break;
             }
-            resolved = next;
+            resolved = next.parent;
             depth++;
         }
         return resolved;
@@ -108,5 +173,6 @@ class SuppressedSpanRegistry {
      */
     void clear() {
         map.clear();
+        nextSweep.set(sweepAt);
     }
 }

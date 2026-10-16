@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -122,8 +123,12 @@ class FilteringSpanProcessorTest {
     private Tracer tracer;
 
     private void setUpPipeline() {
+        setUpPipeline(new SuppressedSpanRegistry());
+    }
+
+    private void setUpPipeline(SuppressedSpanRegistry registry) {
         inMemoryExporter = new InMemoryExporter();
-        registry = new SuppressedSpanRegistry();
+        this.registry = registry;
         telemetryLevel = new TestTelemetryLevel();
         reparentingExporter = new ReparentingSpanExporter(inMemoryExporter, registry);
 
@@ -514,5 +519,67 @@ class FilteringSpanProcessorTest {
                 "client should be re-parented to server");
 
         tearDown();
+    }
+
+    // ----------------------------------------------------------------------
+    // Registry bound under OFF
+    // ----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("under OFF a long-running span stays dropped however many spans pass by")
+    void longRunningSpanSurvivesRegistrySweeps() {
+        // Tiny limits, so the 1000 spans below force dozens of sweeps.
+        setUpPipeline(new SuppressedSpanRegistry(10, 10_000));
+        telemetryLevel.setLevel(TelemetryLevel.OFF);
+
+        Span longRunning = tracer.spanBuilder("long-running").setSpanKind(SpanKind.SERVER).startSpan();
+        for (int i = 0; i < 1000; i++) {
+            tracer.spanBuilder("short-" + i).setSpanKind(SpanKind.CLIENT).startSpan().end();
+        }
+        longRunning.end();
+
+        assertEquals(0, inMemoryExporter.count(), "nothing may leak while OFF");
+        assertTrue(registry.size() < 30,
+                "ended spans should have been swept, size was " + registry.size());
+
+        tearDown();
+    }
+
+    @Test
+    @DisplayName("a sweep drops ended entries and keeps in-flight ones")
+    void sweepKeepsInFlightEntries() {
+        SuppressedSpanRegistry registry = new SuppressedSpanRegistry(3, 1000);
+        SpanContext root = SpanContext.getInvalid();
+
+        registry.record("inflight", root);
+        registry.record("ended-1", root);
+        registry.record("ended-2", root);
+        registry.markEnded("ended-1");
+        registry.markEnded("ended-2");
+
+        registry.record("new", root); // size 3 reaches sweepAt: sweeps first
+
+        assertTrue(registry.isSuppressed("inflight"));
+        assertTrue(registry.isSuppressed("new"));
+        assertFalse(registry.isSuppressed("ended-1"));
+        assertFalse(registry.isSuppressed("ended-2"));
+        assertEquals(2, registry.size());
+    }
+
+    @Test
+    @DisplayName("only spans that never end make the registry clear itself")
+    void hardMaxClearsAsLastResort() {
+        SuppressedSpanRegistry registry = new SuppressedSpanRegistry(2, 4);
+        SpanContext root = SpanContext.getInvalid();
+
+        for (int i = 0; i < 4; i++) {
+            registry.record("leaked-" + i, root);
+        }
+        assertEquals(4, registry.size(), "in-flight entries survive sweeps below hardMax");
+
+        registry.record("next", root); // 4 in flight reaches hardMax: cleared
+
+        assertEquals(1, registry.size());
+        assertTrue(registry.isSuppressed("next"));
     }
 }

@@ -51,7 +51,30 @@ regardless.
 > Context propagation keeps working while tracing is off, so a trace resumes
 > coherently the moment the flag is flipped back: a span that survives is
 > re-parented past any ancestor dropped while `OFF`, the same way children of
-> suppressed `INTERNAL` spans are.
+> suppressed `INTERNAL` spans are. Propagation also has a cost: see
+> [Known limitations](#known-limitations).
+
+### Known limitations
+
+`OFF` / `otelEnabled=false` is kept for completeness, with these trade-offs
+known and accepted:
+
+- **Gaps in traces that cross services.** While `OFF`, outgoing calls still
+  carry `traceparent` with the *sampled* flag set, because the spans are only
+  dropped after they have been created and propagated. A downstream service
+  that is still tracing (for example with the default parent-based sampler)
+  keeps recording and exports spans whose parent never reaches the backend.
+  Those traces show up with a missing parent or root. The same applies to the
+  surviving half of a trace when the flag is flipped part-way through a request.
+- **No CPU saving in Java.** See above. Both points change with
+  [#21](https://github.com/OTelFeature/otelfeature-java-extension/issues/21):
+  dropping at the sampler marks the context *not sampled*, so downstream
+  services stop sampling too. That is a behaviour change worth calling out when
+  it lands.
+- **Spans that never end.** The registry of suppressed spans is bounded by
+  sweeping out spans that have already ended. It only falls back to clearing
+  everything — briefly letting in-flight spans through — if 100,000 suppressed
+  spans are open at once, which means instrumentation is leaking spans.
 
 ## How it works
 

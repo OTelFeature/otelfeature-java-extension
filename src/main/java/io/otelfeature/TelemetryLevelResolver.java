@@ -118,10 +118,16 @@ final class TelemetryLevelResolver<T> implements TelemetryLevelSource {
      * <p>Wired to the provider's READY / CONFIGURATION_CHANGED / ERROR / STALE
      * events rather than called from the span path.
      *
+     * <p>{@code synchronized} because the SDK dispatches event handlers on a
+     * thread pool: two events in quick succession could otherwise evaluate the
+     * old and the new ruleset concurrently and write in the wrong order,
+     * leaving a stale answer - say {@code OFF} - cached until the next event.
+     * The span path never takes this lock.
+     *
      * @param flagsChanged the keys the provider reported as changed, or
      *     {@code null}/empty when it didn't say (READY, ERROR, STALE)
      */
-    void classify(List<String> flagsChanged) {
+    synchronized void classify(List<String> flagsChanged) {
         // When the provider names the keys that moved and ours isn't among
         // them, nothing about our classification can have changed.
         if (flagsChanged != null && !flagsChanged.isEmpty() && !flagsChanged.contains(flagKey)) {

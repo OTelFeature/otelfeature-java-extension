@@ -32,8 +32,9 @@ import java.util.List;
  * <p>This works in concert with {@link FilteringSpanProcessor} via a shared
  * {@link SuppressedSpanRegistry}:
  * <ol>
- *   <li>{@code FilteringSpanProcessor} drops {@code INTERNAL} spans and records
- *       their IDs in the registry.</li>
+ *   <li>{@code FilteringSpanProcessor} drops spans ({@code INTERNAL} ones at
+ *       {@code IO}, all of them at {@code OFF}) and records their IDs in the
+ *       registry.</li>
  *   <li>This exporter checks each surviving span's parent ID against the
  *       registry. If the parent was suppressed, the span is re-parented to
  *       the nearest non-suppressed ancestor (following the chain transitively).</li>

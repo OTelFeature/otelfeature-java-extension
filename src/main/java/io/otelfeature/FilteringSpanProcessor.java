@@ -104,7 +104,11 @@ public class FilteringSpanProcessor implements SpanProcessor {
     public void onEnd(ReadableSpan span) {
         // Deliberately the registry and not the flag: the decision belongs to
         // onStart, and re-asking could answer differently for the same span.
-        if (registry.isSuppressed(span.getSpanContext().getSpanId())) {
+        String spanId = span.getSpanContext().getSpanId();
+        if (registry.isSuppressed(spanId)) {
+            // From here on the entry is only needed to re-parent children, so
+            // the registry may sweep it once it fills up.
+            registry.markEnded(spanId);
             return; // don't forward to delegate (BatchSpanProcessor)
         }
         delegate.onEnd(span);
