@@ -76,6 +76,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The tag must match build.gradle: v0.4.0 for version '0.4.0',
+      # v0.4.0-rc.1 for version '0.4.0-rc.1'.
+      - name: Check tag matches build.gradle version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n "s/^version = '\(.*\)'$/\1/p" build.gradle)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match build.gradle version $version"
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -99,4 +111,5 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
           files: build/libs/otelfeature-java-extension.jar
