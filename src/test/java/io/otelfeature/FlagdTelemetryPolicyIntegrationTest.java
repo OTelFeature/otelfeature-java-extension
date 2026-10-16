@@ -223,7 +223,8 @@ class FlagdTelemetryPolicyIntegrationTest {
         // FLAG_NOT_FOUND is cached: the answer is the fallback for every span,
         // with no per-span evaluation, until the ruleset changes again.
         assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.FULL
-                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
+                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())
+                        && telemetryLevel.cachedPolicy() == TelemetryPolicy.FULL),
                 "missing flags should be kept as their startup defaults");
         assertEquals(TelemetryPolicy.FULL, telemetryLevel.policy(null));
 
@@ -286,7 +287,8 @@ class FlagdTelemetryPolicyIntegrationTest {
                 """);
 
         assertTrue(waitFor(() -> telemetryLevel.cachedLevel() == TelemetryLevel.IO
-                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())),
+                        && Boolean.TRUE.equals(telemetryLevel.cachedEnabled())
+                        && telemetryLevel.cachedPolicy() == TelemetryPolicy.IO),
                 "a removed otelEnabled should fall back to 'on', and be kept");
         assertEquals(TelemetryPolicy.IO, telemetryLevel.policy(null));
     }

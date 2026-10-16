@@ -380,6 +380,65 @@ like a query over your telemetry:
 }
 ```
 
+#### The service's error rate: `otelfeature.http.server.error_rate`
+
+One key isn't an OpenTelemetry attribute but comes from the service's own
+metrics: the share of HTTP server requests that failed in the last interval.
+It is the input to a control loop that lives entirely in a flagd rule, with no
+outside script and no new metric:
+
+```json
+"traceSampleRatio": {
+  "state": "ENABLED", "defaultVariant": "tenth",
+  "variants": { "tenth": 0.1, "all": 1.0 },
+  "targeting": { "if": [
+    { ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }, "all", null ] }
+}
+```
+
+- **Source.** The Java agent's HTTP server instrumentation already records
+  `http.server.request.duration` and sets `error.type` on failed requests
+  (stable HTTP semconv, the default since agent 2.0). The extension adds one
+  extra, in-process metric reader with **delta** temporality next to the OTLP
+  one. Each collection is then exactly one interval:
+  `error_rate = requests with error.type / all requests`, with no window or
+  smoothing. A point without `error.type` but with
+  `http.response.status_code >= 500` also counts as an error.
+- **Metrics, not spans.** A sampled-out span never records a status, but the
+  histogram is recorded whatever the sampling does, so turning sampling *down*
+  doesn't blind the loop.
+- **Unchanged export.** The extra reader has its own delta storage, and keeps
+  storage only for histograms (everything else is dropped for it). What the
+  OTLP reader exports, cumulative or not, is unaffected (tested), with one
+  caveat: **asynchronous instruments' callbacks also run on this reader's
+  interval**, since a meter provider invokes them for every reader. A callback
+  with side effects (say, `observe(counter.getAndSet(0))`) would hand part of
+  its data to this reader instead of the exporter. Idempotent callbacks, which
+  the agent's are, are unaffected.
+- **Exponential histograms**, if a view switches `http.server.request.duration`
+  to them, are read too; only counts are used.
+- **Not with `OTEL_METRICS_EXPORTER=none`.** With no reader the agent's meters
+  are no-ops. Registering this one would switch the whole metrics SDK on, and
+  every instrument would aggregate for nobody. So in that case the reader isn't
+  registered and **there is no error rate**:
+  `otelfeature.http.server.error_rate` never appears in the context, and
+  error-rate rules don't match (their flag serves its default variant). The same goes when HTTP server instrumentation is off
+  (`otel.instrumentation.common.default-enabled=false`, or the server module
+  disabled): there is no histogram to read.
+- **On failure** (a collection that throws), the last rate is withdrawn rather
+  than kept, so a rule doesn't stay stuck on a stale number.
+- **`OTELFEATURE_ERROR_RATE_INTERVAL`** (default `10s`; accepts `500ms`, `10s`,
+  `1m`, or plain seconds) sets how often it is collected.
+- **`OTELFEATURE_ERROR_RATE_MIN_REQUESTS`** (default `10`). An interval with
+  fewer requests publishes **no** rate, and the key is left out of the
+  context: 1 failure in 2 requests is not a 50% error rate worth acting on.
+  A rule then sees the key as missing, and `>` against a missing `var` is
+  false. Prefer `>`-style rules: with `<` or `<=`, some JsonLogic evaluators
+  coerce a missing value to `0`, so "error rate below 1%" would match while
+  there is *no* rate.
+- The rate is per service (per process, in fact), which matches "turns
+  sampling up *for that service*".
+
 **Shape.** Keys are nested by dot segment: `service.name` is sent as
 `{"service": {"name": "weather"}}`, because JsonLogic's `var` splits on dots in
 every flagd evaluator (see
@@ -452,6 +511,8 @@ java -javaagent:opentelemetry-javaagent.jar -jar your-app.jar
 | `OTELFEATURE_ENABLED_FLAG_NAME`       | `otelEnabled`    | flagd key of the boolean kill switch            |
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME`   | `recordSpan`     | flagd key of the per-span boolean               |
 | `OTELFEATURE_SAMPLE_RATIO_FLAG_NAME`  | `traceSampleRatio` | flagd key of the sampling ratio (`0.0`–`1.0`) |
+| `OTELFEATURE_ERROR_RATE_INTERVAL`     | `10s`            | how often `otelfeature.http.server.error_rate` is computed |
+| `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10`             | fewest requests per interval for an error rate  |
 | `OTELFEATURE_ENFORCEMENT`             | `processor`      | `processor` or `sampler`, see [Enforcement](#enforcement-processor-or-sampler) |
 
 > [!IMPORTANT]

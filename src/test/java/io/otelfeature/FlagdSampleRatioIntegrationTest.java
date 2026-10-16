@@ -181,6 +181,27 @@ class FlagdSampleRatioIntegrationTest {
         assertEquals(0.1, policy.policy(root()).sampleRatio(), "everyone else stays at 0.1");
     }
 
+    @Test
+    @DisplayName("Demo 3: error_rate > 0.05 turns sampling up to 1.0, and back down when it recovers")
+    void errorRateRaisesSampling() throws IOException {
+        start(flags("""
+                    "traceSampleRatio": {
+                      "state": "ENABLED", "defaultVariant": "tenth",
+                      "variants": { "tenth": 0.1, "all": 1.0 },
+                      "targeting": { "if": [
+                        { ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }, "all", null ] }
+                    }"""));
+        assertTrue(waitFor(() -> policy.sampleRatioInPlay()));
+
+        assertEquals(0.1, policy.policy(root()).sampleRatio(), "no rate published yet");
+        policy.setErrorRate(0.12);
+        assertEquals(1.0, policy.policy(root()).sampleRatio(), "errors went up");
+        policy.setErrorRate(0.01);
+        assertEquals(0.1, policy.policy(root()).sampleRatio(), "errors went down");
+        policy.setErrorRate(null);
+        assertEquals(0.1, policy.policy(root()).sampleRatio(), "too few requests: no rate, default");
+    }
+
     private static boolean waitFor(BooleanSupplier condition) {
         long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
         while (System.currentTimeMillis() < deadline) {

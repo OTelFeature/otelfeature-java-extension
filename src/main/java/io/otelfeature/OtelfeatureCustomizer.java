@@ -18,6 +18,7 @@ package io.otelfeature;
 
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
@@ -90,11 +91,44 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
             return;
         }
         FlagdTelemetryPolicy policy = new FlagdTelemetryPolicy();
+        ErrorRateReader errorRate = new ErrorRateReader(policy::setErrorRate,
+                envDuration("OTELFEATURE_ERROR_RATE_INTERVAL", Duration.ofSeconds(10)),
+                envLong("OTELFEATURE_ERROR_RATE_MIN_REQUESTS", 10));
+        install(autoConfiguration, policy, errorRate, Enforcement.fromEnvironment());
+
+        // The provider holds a gRPC channel to flagd; close it on the way out
+        // rather than leaving the sync stream to be torn down by the JVM.
+        Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
+                "otelfeature-shutdown"));
+    }
+
+    /**
+     * The wiring itself, with its parts passed in. Visible for testing.
+     *
+     * @param autoConfiguration the agent's autoconfigure hooks
+     * @param policy where the flags come from
+     * @param errorRate the reader that feeds {@code otelfeature.http.server.error_rate}
+     * @param mode where {@code enabled=false} is enforced
+     */
+    static void install(AutoConfigurationCustomizer autoConfiguration, FlagdTelemetryPolicy policy,
+            ErrorRateReader errorRate, Enforcement mode) {
         SuppressedSpanRegistry registry = new SuppressedSpanRegistry();
-        Enforcement mode = Enforcement.fromEnvironment();
         Logger.getLogger(OtelfeatureCustomizer.class.getName()).info(
                 "otelfeature-java-extension: enforcing at the " + mode.name().toLowerCase()
                         + " (" + Enforcement.ENV + ")");
+
+        // The service's HTTP error rate, from its own request-duration metric,
+        // for rules like "error_rate > 0.05 -> traceSampleRatio 1.0". Not with
+        // OTEL_METRICS_EXPORTER=none: without a reader the agent's meters are
+        // no-ops, and ours would switch the whole metrics SDK on for nobody.
+        autoConfiguration.addMeterProviderCustomizer((meterProvider, config) -> {
+            if (metricsExportDisabled(config.getString("otel.metrics.exporter", "otlp"))) {
+                log.info("otelfeature-java-extension: OTEL_METRICS_EXPORTER=none - "
+                        + ErrorRateReader.ERROR_RATE_KEY_DOC + " is not computed");
+                return meterProvider;
+            }
+            return meterProvider.registerMetricReader(errorRate);
+        });
 
         // The resource is the process-wide part of every evaluation context.
         autoConfiguration.addResourceCustomizer((resource, config) -> {
@@ -119,11 +153,74 @@ public class OtelfeatureCustomizer implements AutoConfigurationCustomizerProvide
 
         autoConfiguration.addSpanExporterCustomizer(
                 (exporter, config) -> new ReparentingSpanExporter(exporter, registry));
+    }
 
-        // The provider holds a gRPC channel to flagd; close it on the way out
-        // rather than leaving the sync stream to be torn down by the JVM.
-        Runtime.getRuntime().addShutdownHook(new Thread(policy::shutdown,
-                "otelfeature-shutdown"));
+    /** Whether {@code otel.metrics.exporter} lists only {@code none}. */
+    static boolean metricsExportDisabled(String exporters) {
+        if (exporters == null || exporters.isBlank()) {
+            return false;
+        }
+        for (String exporter : exporters.split(",")) {
+            if (!"none".equalsIgnoreCase(exporter.trim())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * A duration from the environment: {@code 500ms}, {@code 10s}, {@code 1m},
+     * or a plain number of seconds.
+     */
+    static Duration envDuration(String name, Duration fallback) {
+        return parseDuration(System.getenv(name), fallback, name);
+    }
+
+    static Duration parseDuration(String value, Duration fallback, String name) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        String v = value.trim().toLowerCase(java.util.Locale.ROOT);
+        try {
+            Duration parsed;
+            if (v.endsWith("ms")) {
+                parsed = Duration.ofMillis(Long.parseLong(v.substring(0, v.length() - 2).trim()));
+            } else if (v.endsWith("s")) {
+                parsed = Duration.ofSeconds(Long.parseLong(v.substring(0, v.length() - 1).trim()));
+            } else if (v.endsWith("m")) {
+                parsed = Duration.ofMinutes(Long.parseLong(v.substring(0, v.length() - 1).trim()));
+            } else {
+                parsed = Duration.ofSeconds(Long.parseLong(v));
+            }
+            if (parsed.isNegative() || parsed.isZero()) {
+                throw new NumberFormatException("not positive");
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a duration, using "
+                    + fallback.toMillis() + "ms");
+            return fallback;
+        }
+    }
+
+    static long envLong(String name, long fallback) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            long parsed = Long.parseLong(value.trim());
+            if (parsed < 0) {
+                log.warning("otelfeature-java-extension: " + name + "='" + value + "' is negative, using "
+                        + fallback);
+                return fallback;
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            log.warning("otelfeature-java-extension: " + name + "='" + value + "' is not a number, using "
+                    + fallback);
+            return fallback;
+        }
     }
 
     /**
