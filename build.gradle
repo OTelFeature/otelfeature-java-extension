@@ -35,6 +35,13 @@ dependencies {
         // second copy shipped in here would be a different set of classes.
         exclude group: 'io.opentelemetry'
     }
+    // The opt-in tracing hook for the extension's own evaluations
+    // (OTELFEATURE_OPENFEATURE_TRACING_HOOK, see EvaluationTracing). Its
+    // opentelemetry-api is the agent's, as above; the semconv constants it
+    // reads are bundled and relocated (shadowJar below).
+    implementation('dev.openfeature.contrib.hooks:otel:3.3.1') {
+        exclude group: 'io.opentelemetry'
+    }
     // The flagd provider logs through SLF4J. Without a binding it prints a
     // "no providers found" warning and silently discards its own diagnostics;
     // route it to JUL, which is what the rest of this extension already uses.
@@ -67,6 +74,12 @@ shadowJar {
     // resolver, and with it the ability to resolve "flagd:8015" at all.
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
+
+    // The agent remaps io.opentelemetry.semconv in extension classes to its
+    // own shaded copy, which need not hold the incubating 1.28 constants the
+    // tracing hook was compiled against. Our own copy, under our own name,
+    // is out of the remapper's reach.
+    relocate 'io.opentelemetry.semconv', 'io.otelfeature.shaded.io.opentelemetry.semconv'
 }
 
 // So `gradle build` produces the extension JAR, not just the thin one.

@@ -86,6 +86,9 @@ import java.util.logging.Logger;
  *       {@code recordSpan})</li>
  *   <li>{@code OTELFEATURE_SAMPLE_RATIO_FLAG_NAME} - sample-ratio flag key
  *       (default: {@code traceSampleRatio})</li>
+ *   <li>{@code OTELFEATURE_OPENFEATURE_TRACING_HOOK} - {@code true} records
+ *       these evaluations through the OpenFeature OpenTelemetry hook (default:
+ *       off; see {@link EvaluationTracing})</li>
  * </ul>
  */
 public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
@@ -137,7 +140,8 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
                 env("OTELFEATURE_RECORD_SPAN_FLAG_NAME", "recordSpan"),
                 env("OTELFEATURE_SAMPLE_RATIO_FLAG_NAME", "traceSampleRatio"),
                 TelemetryPolicy.startupDefaults(),
-                inProcessOptions());
+                inProcessOptions(),
+                EvaluationTracing.fromEnvironment());
     }
 
     /**
@@ -181,12 +185,36 @@ public final class FlagdTelemetryPolicy implements TelemetryPolicySource {
      */
     FlagdTelemetryPolicy(String levelFlagKey, String enabledFlagKey, String recordFlagKey,
             String ratioFlagKey, TelemetryPolicy defaults, FlagdOptions options) {
+        this(levelFlagKey, enabledFlagKey, recordFlagKey, ratioFlagKey, defaults, options, false);
+    }
+
+    /**
+     * Visible for testing, with every flag key and the tracing hook.
+     *
+     * @param levelFlagKey the {@code telemetryLevel} flag to resolve
+     * @param enabledFlagKey the {@code otelEnabled} flag to resolve
+     * @param recordFlagKey the {@code recordSpan} flag to resolve
+     * @param ratioFlagKey the {@code traceSampleRatio} flag to resolve
+     * @param defaults the per-field fallback
+     * @param options how to reach flagd
+     * @param tracingHook whether to record these evaluations through the
+     *     OpenFeature OpenTelemetry hook ({@link EvaluationTracing})
+     */
+    FlagdTelemetryPolicy(String levelFlagKey, String enabledFlagKey, String recordFlagKey,
+            String ratioFlagKey, TelemetryPolicy defaults, FlagdOptions options, boolean tracingHook) {
         // createIsolated(), deliberately not getInstance(): this extension runs
         // inside somebody else's application, and that application may well use
         // OpenFeature itself. Registering our flagd provider on the global
         // singleton would replace theirs.
         this.api = OpenFeatureAPI.createIsolated();
         Client client = api.getClient();
+        if (tracingHook) {
+            // On our client only: the application's OpenFeature, and its
+            // evaluations, never see it.
+            client.addHooks(EvaluationTracing.hook());
+            log.info("otelfeature-java-extension: " + EvaluationTracing.ENV + "=true - recording the"
+                    + " extension's own flag evaluations as span events, on the span current at evaluation");
+        }
 
         this.floorEnabled = defaults.enabled();
         TelemetryLevel defaultLevel = TelemetryLevel.of(defaults);

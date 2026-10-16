@@ -484,6 +484,44 @@ backends handle gracefully (same as any sampling scenario).
 No code changes to the service — just attach the extension JAR alongside the
 agent.
 
+### Flag evaluations as span events (opt-in)
+
+The extension records nothing about its decisions on spans: not which flag
+evaluated to what, not the applied ratio. That is the job of the
+[OpenFeature OpenTelemetry hook](https://github.com/open-feature/java-sdk-contrib/tree/main/hooks/open-telemetry),
+registered by whoever wants it, typically the application for its own flags.
+
+For the extension's own evaluations it can be switched on with
+`OTELFEATURE_OPENFEATURE_TRACING_HOOK=true`, the same variable and semantics
+as in [otelfeature-instrument](https://github.com/OTelFeature/otelfeature-instrument):
+only `true` (case and surrounding whitespace ignored) turns it on. The hook
+(`dev.openfeature.contrib.hooks:otel`, bundled) goes on the client of the
+extension's **isolated** OpenFeature API only, so the application's own
+OpenFeature API and its evaluations never see it.
+
+It is **off by default on purpose**: a static flag is not evaluated per span,
+but a flag with targeting, or one in an error state (during a flagd outage,
+say), is, and each evaluation adds an event: one per such flag per span start,
+so up to three on a child's parent (`otelEnabled`, `telemetryLevel`,
+`recordSpan`). On a busy service that is exactly the noise this project
+removes. Use it to debug a rule, not permanently.
+
+Where the events land: on the span that is current while the flag is
+evaluated, the **parent** of the span being decided, since that span doesn't
+exist yet. So targeted evaluations for child spans show up on their parent,
+while evaluations for a **new root** (including every `traceSampleRatio`
+evaluation) have no current span and record nothing. Evaluation errors are
+not recorded as exceptions on application spans: the hook has no switch for
+that, so the extension leaves out its error callback.
+
+Names: the Java hook (3.3.1) still writes the semantic conventions **1.28**
+names, an event `feature_flag` with `feature_flag.key`, `feature_flag.variant`
+and `feature_flag.provider_name`. The Python hook writes the current ones
+(`feature_flag.evaluation`, `feature_flag.result.variant`,
+`feature_flag.provider.name`). A rule or dashboard that reads both services'
+events has to match both
+([OTelFeature/poc#30](https://github.com/OTelFeature/poc/issues/30)).
+
 ## Usage
 
 ### With the OTel Java agent
@@ -514,6 +552,7 @@ java -javaagent:opentelemetry-javaagent.jar -jar your-app.jar
 | `OTELFEATURE_ERROR_RATE_INTERVAL`     | `10s`            | how often `otelfeature.http.server.error_rate` is computed |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10`             | fewest requests per interval for an error rate  |
 | `OTELFEATURE_ENFORCEMENT`             | `processor`      | `processor` or `sampler`, see [Enforcement](#enforcement-processor-or-sampler) |
+| `OTELFEATURE_OPENFEATURE_TRACING_HOOK` | `false`         | `true` records the extension's own flag evaluations as span events, see [opt-in hook](#flag-evaluations-as-span-events-opt-in) |
 
 > [!IMPORTANT]
 > `FLAGD_PORT` now defaults to flagd's gRPC **sync** port `8015`, not the OFREP
@@ -615,6 +654,9 @@ now bundles the real thing:
 - `dev.openfeature:sdk` — the OpenFeature Java SDK
 - `dev.openfeature.contrib.providers:flagd` — the flagd provider, and with it
   gRPC, protobuf, jackson and gson
+- `dev.openfeature.contrib.hooks:otel` — the OpenFeature OpenTelemetry hook,
+  used only with `OTELFEATURE_OPENFEATURE_TRACING_HOOK=true`, and with it the
+  semantic-conventions constants it reads
 
 They are shaded into the single extension JAR (`shadowJar`), so usage is
 unchanged — still one JAR on the agent's extension path — but that JAR is now
@@ -622,8 +664,12 @@ roughly 27 MB rather than 30 KB. `mergeServiceFiles()` is required because
 gRPC discovers `ManagedChannelProvider`/`NameResolverProvider` through
 `META-INF/services`.
 
-Nothing is relocated. Should the agent's own gRPC instrumentation end up
-tracing the flag sync stream, or the bundled classes collide with the host
+Only the semantic-conventions constants are relocated (to
+`io.otelfeature.shaded.io.opentelemetry.semconv`): the agent rewrites
+`io.opentelemetry.semconv` references in extension classes to its own shaded
+copy, which need not hold the incubating constants the hook was built against.
+Nothing else is. Should the agent's own gRPC instrumentation end up tracing
+the flag sync stream, or the bundled classes collide with the host
 application's, relocation is one `relocate` line per package in the same
 `shadowJar` block.
 
