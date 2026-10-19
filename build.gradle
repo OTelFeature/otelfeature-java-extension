@@ -29,7 +29,7 @@ dependencies {
 
     // Bundled into the extension JAR: the agent provides none of this.
     implementation 'dev.openfeature:sdk:1.23.0'
-    implementation('dev.openfeature.contrib.providers:flagd:0.14.2') {
+    implementation('dev.openfeature.contrib.providers:flagd:0.15.0') {
         // The agent supplies opentelemetry-api at runtime, and relocates the
         // io.opentelemetry references inside extension classes to match. A
         // second copy shipped in here would be a different set of classes.
