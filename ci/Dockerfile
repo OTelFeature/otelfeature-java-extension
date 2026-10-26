@@ -17,7 +17,7 @@
 #              or `COPY --from=` in another Dockerfile.
 
 # Pinned by tag and digest; Dependabot (docker ecosystem) proposes bumps.
-FROM gradle:9.8.1-jdk21@sha256:d5c815d1281e3edc7e986ca573b1b309639747fa0d91a2199adadf327cfdf634 AS toolchain
+FROM gradle:9.8.2-jdk21@sha256:37110d25b7a0f866d07f7e61968347b83d2e0fd01bd6ddf74c9ae2ff04000691 AS toolchain
 
 ENV GRADLE_OPTS="-Dorg.gradle.welcome=never"
 WORKDIR /src
