@@ -6,6 +6,13 @@ extension that adds flagd-controlled span suppression — from dropping
 service — the Java counterpart to the Python
 [otelfeature-instrument](https://github.com/OTelFeature/otelfeature-instrument).
 
+> From the KubeCon + CloudNativeCon North America 2026 talk
+> **OpenFeature as a Control Plane for OpenTelemetry** by Simon Schrottner
+> ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-java-extension)) and Juliano Costa
+> ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-java-extension)). The talk page has how to
+> reach us, and the slides and recording once they're out:
+> **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
+
 ## What it does
 
 The OTel Java agent auto-instruments libraries and produces spans of various
@@ -704,3 +711,13 @@ shipping a second one.
 Both achieve the same result: flagd-controlled span suppression with zero
 service code changes. The delivery mechanism is idiomatic for each
 language.
+
+## Talk to us
+
+This is a prototype with open questions, and we'd like to hear how it
+fits your setup:
+
+- [Open an issue](https://github.com/OTelFeature/otelfeature-java-extension/issues/new)
+- CNCF Slack ([invite](https://slack.cncf.io)): `#openfeature` and `#opentelemetry`
+- The speakers' websites: [Simon Schrottner](https://schrottner.at) and
+  [Juliano Costa](https://jcosta.dev)
