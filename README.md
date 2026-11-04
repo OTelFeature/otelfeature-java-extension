@@ -11,7 +11,7 @@ service — the Java counterpart to the Python
 > ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-java-extension)) and Juliano Costa
 > ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-java-extension)). The talk page has how to
 > reach us, and the slides and recording once they're out:
-> **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
+> **[otelfeature.dev](https://otelfeature.dev/)**
 
 ## What it does
 
