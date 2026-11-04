@@ -23,8 +23,9 @@ This README covers what you need to run the extension.
 ### Get the JAR
 
 Each [GitHub Release](https://github.com/OTelFeature/otelfeature-java-extension/releases)
-has `otelfeature-java-extension.jar` attached. To build it yourself, see
-[Development](#development).
+has `otelfeature-java-extension.jar` attached; the latest is always at
+`https://github.com/OTelFeature/otelfeature-java-extension/releases/latest/download/otelfeature-java-extension.jar`.
+To build it yourself, see [Development](#development).
 
 ### Attach it to the agent
 
@@ -35,6 +36,7 @@ java -javaagent:opentelemetry-javaagent.jar \
 ```
 
 or with `OTEL_JAVAAGENT_EXTENSIONS=/path/to/otelfeature-java-extension.jar`.
+It needs Java 21+ and the OpenTelemetry Java agent 2.x (tested with v2.31.1).
 
 ### Configuration
 
@@ -149,7 +151,8 @@ Caveats for `sampler` mode:
   of the default `parentbased_always_on`, the children of a root dropped by
   `recordSpan` are sampled afresh and exported as orphans.
 
-A static `recordSpan`, or none at all, costs nothing per span.
+A static `recordSpan`, or none at all, costs nothing per span. A missing
+flag, a non-boolean value or a provider error records the span (fail open).
 
 ### Sampling ratio: `traceSampleRatio`
 
@@ -217,7 +220,8 @@ while it is set.
 
 `INTERNAL` suppression stays in the processor in both modes, because a sampler
 `DROP` takes the span's whole subtree with it. The sampler wraps the agent's
-configured sampler (`FlagAwareSampler{delegate=...}`). If the agent never
+configured sampler; its `getDescription()` reports
+`FlagAwareSampler{delegate=..., enforcement=processor|sampler}`. If the agent never
 applies it, the processor enforces `OFF` and logs a warning.
 
 ### Known limitations
@@ -252,9 +256,11 @@ Targeted flags are evaluated against OpenTelemetry's own names:
   `http.response.status_code` are **not** in the context: the agent sets them
   later. Target `url.path` instead.
 - Resource keys, `span.kind` and `otel.scope.*` win over a span attribute of
-  the same name. Attributes under `otelfeature.*` are ignored.
+  the same name.
 - The context is sent nested by dot segment. An API, client or hook context
-  that adds a top-level key such as `service` replaces that whole namespace.
+  that adds a top-level key such as `service` would replace that whole
+  namespace; this extension uses an isolated OpenFeature API and adds no such
+  contexts itself.
 
 The full contract is in the spec:
 [evaluation-context contract](https://github.com/OTelFeature/poc/blob/main/docs/spec/entity_model.md#evaluation-context-contract).
@@ -299,9 +305,10 @@ raise sampling when errors rise:
 
 A flag with no `targeting` (flagd reason `STATIC`), or one missing from the
 ruleset, is evaluated once and cached until flagd pushes a changed ruleset.
-Such a span decision is two volatile reads, measured at 5–19 ns per span, with
+Such a span decision is one volatile read, measured at 5–19 ns per span, with
 no allocation. A targeted flag builds the context and evaluates the rule on
-every span: with a three-condition rule, 7.5–9.6 µs per span, of which
+every span: with a three-condition rule (`service.name`, `span.kind`,
+`url.path`), 7.5–9.6 µs per span, of which
 2.5–3 µs is building the context.
 
 These are rough single-machine numbers (developer laptop, JDK 21, flagd `FILE`
@@ -317,8 +324,8 @@ whitespace ignored). This attaches the bundled
 to the extension's own, isolated OpenFeature API. The application's
 OpenFeature API never sees it.
 
-- Keep it off in normal operation: each targeted evaluation adds an event, up
-  to three per span start.
+- Keep it off in normal operation: each targeted flag evaluated adds an
+  event, so several per span start.
 - Events land on the span current while the flag is evaluated, usually the
   **parent** of the span being decided. Evaluations for a new root with no
   current span, such as every `traceSampleRatio` evaluation of an incoming
@@ -350,7 +357,7 @@ At startup it:
 
 | Aspect | Python (`otelfeature-instrument`) | Java (`otelfeature-java-extension`) |
 |--------|------------------------------------|------------------------------------|
-| Delivery | pip package + CLI launcher | agent extension JAR via SPI |
+| Delivery | Python package (release wheel) + CLI launcher | agent extension JAR via SPI |
 | flagd connection | in-process, gRPC sync on 8015 | in-process, gRPC sync on 8015 |
 | `OFF` / `otelEnabled=false` | suppressed at span creation: saves export and CPU | `processor`: saves export, not CPU; `sampler`: roots never recorded |
 | Service code changes | none | none |
@@ -358,7 +365,7 @@ At startup it:
 ## Development
 
 The only host requirement is **Docker** (on Windows, run it in WSL). The
-toolchain (JDK 21, Gradle 9.7.1, all dependencies) is the image in
+toolchain (JDK 21, Gradle 9, all dependencies) is the image in
 [`ci/Dockerfile`](ci/Dockerfile), which CI uses too.
 
 ```sh
@@ -376,10 +383,12 @@ make shell   # a shell in the toolchain image, repo mounted at /src
     https://github.com/OTelFeature/otelfeature-java-extension.git#main
   ```
 
+  The JAR lands at `out/otelfeature-java-extension.jar`.
+
 Without Docker, `gradle build` works with Java 21+ and Gradle 9+.
 
 **Dependencies.** The OpenFeature SDK, the flagd provider (with gRPC,
-protobuf, jackson and gson) and the OpenFeature OpenTelemetry hook are shaded
+protobuf, jackson and gson) the OpenFeature OpenTelemetry hook and `slf4j-jdk14` are shaded
 into the one JAR (about 27 MB). Only the semconv constants are relocated (to
 `io.otelfeature.shaded.io.opentelemetry.semconv`). `io.opentelemetry` is not
 bundled: the agent provides it.
